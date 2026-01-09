@@ -1087,8 +1087,8 @@ function hardware_PWM(self::Pi, gpio, PWMfreq, PWMduty)
 end
 
 function set_internals(self::Pi, dbgLevel, alertFreq)
-    return _u2i(_pigpio_command_ext(
-        self.sl, _PI_CMD_CSI, gpio, PWMfreq, dbgLevel | alertFreq, 0))
+    return _u2i(_pigpio_command(
+        self.sl, _PI_CMD_CSI, dbgLevel | alertFreq, 0))
 end
 
 """
