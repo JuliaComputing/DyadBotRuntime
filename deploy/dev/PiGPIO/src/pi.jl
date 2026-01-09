@@ -104,7 +104,6 @@ Runs a pigpio socket command.
 function _pigpio_command(sl::SockLock, cmd::Integer, p1::Integer, p2::Integer, rl=true)
     lock(sl.l)
     Base.write(sl.s, UInt32.([cmd, p1, p2, 0]))
-
     out = zeros(UInt8, _SOCK_CMD_LEN)
     Base.readbytes!(sl.s, out, _SOCK_CMD_LEN)
     @debug  "_pigpio_command" out
@@ -128,8 +127,8 @@ Runs an extended pigpio socket command.
 function _pigpio_command_ext(sl, cmd, p1, p2, p3, extents, rl=true)
     io = IOBuffer()
     write(io,Cuint.((cmd, p1, p2, p3))...)
-    ext = vcat(take!(io),extents)
-
+    prefix = take!(io)
+    ext = vcat(prefix,extents)
     lock(sl.l)
     write(sl.s, ext)
     out = Base.read(sl.s, _SOCK_CMD_LEN)
@@ -1081,7 +1080,7 @@ function hardware_PWM(self::Pi, gpio, PWMfreq, PWMduty)
 ## extension ##
 # I PWMdutycycle
     extents = IOBuffer()
-    extents =write(extents, 10)
+    write(extents, Int32(PWMduty))
     return _u2i(_pigpio_command_ext(
         self.sl, _PI_CMD_HP, gpio, PWMfreq, 4, extents))
 end
@@ -1222,6 +1221,7 @@ function custom_2(self, arg1=0, argx=[], retMax=8192)
     # I p3 len
     ## extension ##
     # s len argx bytes
+
 
     # Don't raise exception.  Must release lock.
     bytes = u2i(_pigpio_command_ext(
