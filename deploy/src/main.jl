@@ -72,6 +72,8 @@ function (@main)(args)::Cint
     println(Core.stdout, "hello world!")
     p = Pi()
     println(Core.stdout, "pi startup done")
+    PiGPIO.set_internals(p, 8)
+    println(Core.stdout, "set debug level")
     handle_err(PiGPIO.hardware_PWM(p, PWMA_LEFT, 1000, 0))
     handle_err(PiGPIO.hardware_PWM(p, PWMB_RIGHT, 1000, 0)) # use 1kHz pwm for the motor drivers
     println(Core.stdout, "pwm startup done")

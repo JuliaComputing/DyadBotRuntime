@@ -1086,6 +1086,11 @@ function hardware_PWM(self::Pi, gpio, PWMfreq, PWMduty)
         self.sl, _PI_CMD_HP, gpio, PWMfreq, 4, extents))
 end
 
+function set_internals(self::Pi, dbgLevel, alertFreq)
+    return _u2i(_pigpio_command_ext(
+        self.sl, _PI_CMD_CSI, gpio, PWMfreq, dbgLevel | alertFreq, 0))
+end
+
 """
     PiGPIO.get_current_tick(self::Pi)
 
@@ -1373,7 +1378,6 @@ function Pi(; host = get(ENV, "PIGPIO_ADDR", ""), port = get(ENV, "PIGPIO_PORT",
         throw(error)
     end
 end
-
 
 """
     PiGPIO.stop(self::Pi)
