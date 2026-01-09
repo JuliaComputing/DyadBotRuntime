@@ -71,11 +71,15 @@ end
 function (@main)(args)::Cint
     println(Core.stdout, "hello world!")
     p = Pi()
+    println(Core.stdout, "pi startup done")
     handle_err(PiGPIO.hardware_PWM(p, PWMA_LEFT, 1000, 0))
     handle_err(PiGPIO.hardware_PWM(p, PWMB_RIGHT, 1000, 0)) # use 1kHz pwm for the motor drivers
+    println(Core.stdout, "pwm startup done")
     imu_bus = PiGPIO.i2c_open(p, 1, 0x68)
-    imu = MPU6000(p, imu_bus, GyroRange.GYRO_FS_250, AccelRange.ACCEL_FS_2G)
+    println(Core.stdout, "i2c startup done")
+    imu = MPU6000(p, imu_bus, GyroRange.GYRO_FS_250, AccelRange.ACCEL_F_2G)
     wake!(imu)
+    println(Core.stdout, "imu startup done")
     timu = ThreadedMPU6000(imu)
     tenc_1a = ThreadedEncoder(Encoder(p, M1A), 1_000)
     tenc_2a = ThreadedEncoder(Encoder(p, M2A), 1_000)
