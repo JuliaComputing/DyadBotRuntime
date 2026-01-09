@@ -1,9 +1,9 @@
-using PiGPIO
+using WiringPi
 using Timers
 include(joinpath(@__DIR__, "mpu6000.jl"))
 include(joinpath(@__DIR__, "encoder.jl"))
 
-module BalanceController 
+module BalanceController
 include(joinpath(@__DIR__, "balance_original.jl"))
 end
 
@@ -16,9 +16,11 @@ const PWMB_RIGHT = 18 # both have hardware PWM
 const LTRANS_OE = 11 # enables the 3.3V <-> 5V level translator
 const STBY_PIN = 0
 
+const PWM_RANGE = 1024  # Hardware PWM duty cycle range (0-1024)
+
 function handle_err(ec)
     if ec == 0
-        return 
+        return
     end
     println(Core.stdout, "Had error ", ec)
     return
@@ -34,12 +36,12 @@ end
 
 Stop both motors by setting PWM to 0 and appropriate direction pins.
 """
-function car_stop!(p::Pi)
-    write(p, AIN1, 1)     # HIGH
-    write(p, BIN1, 0)     # LOW
-    write(p, STBY_PIN, 1) # HIGH (standby off = enabled, but PWM=0)
-    PiGPIO.set_PWM_dutycycle(p, PWMA_LEFT, 0)
-    PiGPIO.set_PWM_dutycycle(p, PWMB_RIGHT, 0)
+function car_stop!()
+    digitalWrite(AIN1, HIGH)
+    digitalWrite(BIN1, LOW)
+    digitalWrite(STBY_PIN, HIGH) # standby off = enabled, but PWM=0
+    pwmWrite(PWMA_LEFT, 0)
+    pwmWrite(PWMB_RIGHT, 0)
 end
 
 """
@@ -48,43 +50,62 @@ end
 Apply PWM signals to motors based on computed control values.
 Handles direction pin setting based on PWM sign.
 """
-function apply_motor_output!(p::Pi, pwm_left::Float32, pwm_right::Float32)
+function apply_motor_output!(pwm_left::Float32, pwm_right::Float32)
     # Left motor
     if pwm_left < 0
-        write(p, AIN1, 1)
-        PiGPIO.set_PWM_dutycycle(p, PWMA_LEFT, round(Int, -pwm_left))
+        digitalWrite(AIN1, HIGH)
+        pwmWrite(PWMA_LEFT, round(Int, -pwm_left))
     else
-        write(p, AIN1, 0)
-        PiGPIO.set_PWM_dutycycle(p, PWMA_LEFT, round(Int, pwm_left))
+        digitalWrite(AIN1, LOW)
+        pwmWrite(PWMA_LEFT, round(Int, pwm_left))
     end
 
     # Right motor
     if pwm_right < 0
-        write(p, BIN1, 1)
-        PiGPIO.set_PWM_dutycycle(p, PWMB_RIGHT, round(Int, -pwm_right))
+        digitalWrite(BIN1, HIGH)
+        pwmWrite(PWMB_RIGHT, round(Int, -pwm_right))
     else
-        write(p, BIN1, 0)
-        PiGPIO.set_PWM_dutycycle(p, PWMB_RIGHT, round(Int, pwm_right))
+        digitalWrite(BIN1, LOW)
+        pwmWrite(PWMB_RIGHT, round(Int, pwm_right))
     end
 end
 
 function (@main)(args)::Cint
     println(Core.stdout, "hello world!")
-    p = Pi()
-    println(Core.stdout, "pi startup done")
-    PiGPIO.set_internals(p, 8, 0)
-    println(Core.stdout, "set debug level")
-    handle_err(PiGPIO.hardware_PWM(p, PWMA_LEFT, 1000, 0))
-    handle_err(PiGPIO.hardware_PWM(p, PWMB_RIGHT, 1000, 0)) # use 1kHz pwm for the motor drivers
+
+    # Initialize WiringPi with BCM GPIO numbering
+    wiringPiSetupGpio()
+    println(Core.stdout, "wiringPi startup done")
+
+    # Setup GPIO pins as outputs
+    pinMode(AIN1, OUTPUT)
+    pinMode(BIN1, OUTPUT)
+    pinMode(STBY_PIN, OUTPUT)
+    pinMode(M1A, INPUT)
+    pinMode(M2A, INPUT)
+
+    # Setup hardware PWM on motor pins
+    pinMode(PWMA_LEFT, PWM_OUTPUT)
+    pinMode(PWMB_RIGHT, PWM_OUTPUT)
+    pwmSetMode(PWM_MODE_MS)  # Mark-space mode for motor control
+    pwmSetRange(PWM_RANGE)
+    pwmSetClock(19)  # ~1kHz PWM frequency (19.2MHz / 19 / 1024 ≈ 1kHz)
     println(Core.stdout, "pwm startup done")
-    imu_bus = PiGPIO.i2c_open(p, 1, 0x68)
+
+    # Initialize I2C for IMU (address 0x68)
+    imu_handle = wiringPiI2CSetup(0x68)
+    if imu_handle < 0
+        println(Core.stdout, "Failed to initialize I2C")
+        return 1
+    end
     println(Core.stdout, "i2c startup done")
-    imu = MPU6000(p, imu_bus, GyroRange.GYRO_FS_250, AccelRange.ACCEL_F_2G)
+
+    imu = MPU6000(imu_handle, GyroRange.GYRO_FS_250, AccelRange.ACCEL_F_2G)
     wake!(imu)
     println(Core.stdout, "imu startup done")
     timu = ThreadedMPU6000(imu)
-    tenc_1a = ThreadedEncoder(Encoder(p, M1A), 1_000)
-    tenc_2a = ThreadedEncoder(Encoder(p, M2A), 1_000)
+    tenc_1a = ThreadedEncoder(Encoder(M1A), 1_000)
+    tenc_2a = ThreadedEncoder(Encoder(M2A), 1_000)
 
     ctrl = BalanceController()
 
@@ -92,7 +113,7 @@ function (@main)(args)::Cint
     imu_read_margin = 12600000
     println(Core.stdout, "start loop!")
     now = time_ns()
-    while true 
+    while true
         wait_until(start + ml_update_rate_ns - imu_read_margin)
         put!(timu.request, true) # trigger the IMU request
         wait_until(start + ml_update_rate_ns)
@@ -104,10 +125,10 @@ function (@main)(args)::Cint
                       imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
         now = time_ns()
         if isnothing(command)
-            car_stop!(p)
-        else 
+            car_stop!()
+        else
             left, right = command
-            apply_motor_output!(p, left, right)
+            apply_motor_output!(left, right)
         end
     end
     return 0

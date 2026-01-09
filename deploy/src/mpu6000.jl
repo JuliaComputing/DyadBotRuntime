@@ -1,4 +1,4 @@
-using PiGPIO
+using WiringPi
 
 # MPU6000/MPU6050 Register Map
 module MPU6000Registers
@@ -63,153 +63,6 @@ module MPU6000Registers
     # Signal path reset
     const SIGNAL_PATH_RESET = 0x68
     const USER_CTRL = 0x6A
-end
-
-#=============================================================================
-  I2C Command Builder for i2c_zip transactions
-=============================================================================#
-
-"""
-i2c_zip command codes for building I2C transaction sequences.
-"""
-module I2CCommands
-    const CMD_END     = 0x00  # No more commands
-    const CMD_ESCAPE  = 0x01  # Next P is two bytes
-    const CMD_ON      = 0x02  # Switch combined flag on (repeated start)
-    const CMD_OFF     = 0x03  # Switch combined flag off
-    const CMD_ADDRESS = 0x04  # Set I2C address to P
-    const CMD_FLAGS   = 0x05  # Set I2C flags to lsb + (msb << 8)
-    const CMD_READ    = 0x06  # Read P bytes of data
-    const CMD_WRITE   = 0x07  # Write P bytes of data
-end
-
-"""
-    I2CCommandBuilder
-
-Builder for constructing i2c_zip command sequences.
-
-# Example
-```julia
-builder = I2CCommandBuilder()
-write_register!(builder, 0x3B)  # Set register pointer
-read_bytes!(builder, 14)        # Read 14 bytes
-cmd = finish!(builder)
-(count, data) = PiGPIO.i2c_zip(pi, handle, cmd)
-```
-"""
-mutable struct I2CCommandBuilder
-    commands::Vector{UInt8}
-end
-
-I2CCommandBuilder() = I2CCommandBuilder(UInt8[])
-
-"""
-    set_address!(builder::I2CCommandBuilder, addr::UInt8)
-
-Add command to set the I2C slave address.
-"""
-function set_address!(builder::I2CCommandBuilder, addr::UInt8)
-    push!(builder.commands, I2CCommands.CMD_ADDRESS)
-    push!(builder.commands, addr)
-    return builder
-end
-
-"""
-    combined_on!(builder::I2CCommandBuilder)
-
-Enable combined transactions (repeated start instead of stop+start).
-"""
-function combined_on!(builder::I2CCommandBuilder)
-    push!(builder.commands, I2CCommands.CMD_ON)
-    return builder
-end
-
-"""
-    combined_off!(builder::I2CCommandBuilder)
-
-Disable combined transactions (use stop+start between operations).
-"""
-function combined_off!(builder::I2CCommandBuilder)
-    push!(builder.commands, I2CCommands.CMD_OFF)
-    return builder
-end
-
-"""
-    write_bytes!(builder::I2CCommandBuilder, data::Vector{UInt8})
-
-Add command to write bytes to the device.
-"""
-function write_bytes!(builder::I2CCommandBuilder, data::Vector{UInt8})
-    n = length(data)
-    if n > 255
-        # Use escape for 2-byte length
-        push!(builder.commands, I2CCommands.CMD_ESCAPE)
-        push!(builder.commands, I2CCommands.CMD_WRITE)
-        push!(builder.commands, UInt8(n & 0xFF))
-        push!(builder.commands, UInt8((n >> 8) & 0xFF))
-    else
-        push!(builder.commands, I2CCommands.CMD_WRITE)
-        push!(builder.commands, UInt8(n))
-    end
-    append!(builder.commands, data)
-    return builder
-end
-
-"""
-    write_bytes!(builder::I2CCommandBuilder, data::UInt8...)
-
-Add command to write bytes to the device (vararg version).
-"""
-function write_bytes!(builder::I2CCommandBuilder, data::UInt8...)
-    return write_bytes!(builder, collect(UInt8, data))
-end
-
-"""
-    write_register!(builder::I2CCommandBuilder, reg::UInt8)
-
-Add command to write a single register address (for setting read pointer).
-"""
-function write_register!(builder::I2CCommandBuilder, reg::UInt8)
-    return write_bytes!(builder, [reg])
-end
-
-"""
-    read_bytes!(builder::I2CCommandBuilder, count::Integer)
-
-Add command to read `count` bytes from the device.
-"""
-function read_bytes!(builder::I2CCommandBuilder, count::Integer)
-    if count > 255
-        # Use escape for 2-byte length
-        push!(builder.commands, I2CCommands.CMD_ESCAPE)
-        push!(builder.commands, I2CCommands.CMD_READ)
-        push!(builder.commands, UInt8(count & 0xFF))
-        push!(builder.commands, UInt8((count >> 8) & 0xFF))
-    else
-        push!(builder.commands, I2CCommands.CMD_READ)
-        push!(builder.commands, UInt8(count))
-    end
-    return builder
-end
-
-"""
-    finish!(builder::I2CCommandBuilder) -> Vector{UInt8}
-
-Finalize the command sequence by adding the END command and return the command buffer.
-"""
-function finish!(builder::I2CCommandBuilder)
-    push!(builder.commands, I2CCommands.CMD_END)
-    return builder.commands
-end
-
-"""
-    reset!(builder::I2CCommandBuilder)
-
-Clear the command buffer to reuse the builder.
-"""
-function reset!(builder::I2CCommandBuilder)
-    empty!(builder.commands)
-    return builder
 end
 
 #=============================================================================
@@ -299,27 +152,23 @@ end
 Wrapper struct for MPU6000/MPU6050 IMU sensor communication via I2C.
 
 # Fields
-- `pi::Pi`: PiGPIO Pi instance
-- `handle::Int`: I2C handle returned from i2c_open
+- `handle::Int`: I2C file descriptor returned from wiringPiI2CSetup
 - `gyro_range::GyroRange`: Current gyroscope full-scale range
 - `accel_range::AccelRange`: Current accelerometer full-scale range
-- `cmd_builder::I2CCommandBuilder`: Reusable command builder for i2c_zip
 """
 mutable struct MPU6000
-    pi::Pi
     handle::Int
     gyro_range::GyroRange
     accel_range::AccelRange
-    cmd_builder::I2CCommandBuilder
 end
 
 """
-    MPU6000(pi::Pi, handle::Int)
+    MPU6000(handle::Int)
 
 Create an MPU6000 instance with default range settings (±250°/s gyro, ±2g accel).
 """
-function MPU6000(pi::Pi, handle::Int)
-    return MPU6000(pi, handle, GYRO_FS_250, ACCEL_FS_2G, I2CCommandBuilder())
+function MPU6000(handle::Int)
+    return MPU6000(handle, GYRO_FS_250, ACCEL_FS_2G)
 end
 
 #=============================================================================
@@ -332,7 +181,7 @@ end
 Write a single byte to the specified register.
 """
 function write_byte(mpu::MPU6000, reg::UInt8, value::UInt8)
-    return PiGPIO.i2c_write_byte_data(mpu.pi, mpu.handle, reg, value)
+    return wiringPiI2CWriteReg8(mpu.handle, Int(reg), Int(value))
 end
 
 """
@@ -341,40 +190,33 @@ end
 Read a single byte from the specified register.
 """
 function read_byte(mpu::MPU6000, reg::UInt8)
-    return PiGPIO.i2c_read_byte_data(mpu.pi, mpu.handle, reg)
+    return UInt8(wiringPiI2CReadReg8(mpu.handle, Int(reg)))
 end
 
 """
     read_bytes(mpu::MPU6000, reg::UInt8, count::Integer) -> Vector{UInt8}
 
-Read multiple bytes starting from the specified register using i2c_zip.
-This is more efficient than multiple single-byte reads.
+Read multiple bytes starting from the specified register.
+Reads sequentially from consecutive registers.
 """
 function read_bytes(mpu::MPU6000, reg::UInt8, count::Integer)
-    reset!(mpu.cmd_builder)
-    write_register!(mpu.cmd_builder, reg)
-    read_bytes!(mpu.cmd_builder, count)
-    cmd = finish!(mpu.cmd_builder)
-
-    (n, data) = PiGPIO.i2c_zip(mpu.pi, mpu.handle, cmd)
-    if n < 0
-        error("i2c_zip failed with error code: $n")
+    data = Vector{UInt8}(undef, count)
+    for i in 1:count
+        data[i] = UInt8(wiringPiI2CReadReg8(mpu.handle, Int(reg) + i - 1))
     end
-    return Vector{UInt8}(data)
+    return data
 end
 
 """
     write_bytes(mpu::MPU6000, reg::UInt8, data::Vector{UInt8})
 
-Write multiple bytes starting at the specified register using i2c_zip.
+Write multiple bytes starting at the specified register.
 """
 function write_bytes(mpu::MPU6000, reg::UInt8, data::Vector{UInt8})
-    reset!(mpu.cmd_builder)
-    write_bytes!(mpu.cmd_builder, vcat([reg], data))
-    cmd = finish!(mpu.cmd_builder)
-
-    (n, _) = PiGPIO.i2c_zip(mpu.pi, mpu.handle, cmd)
-    return n
+    for (i, byte) in enumerate(data)
+        wiringPiI2CWriteReg8(mpu.handle, Int(reg) + i - 1, Int(byte))
+    end
+    return 0
 end
 
 #=============================================================================
@@ -457,7 +299,7 @@ function set_sample_rate!(mpu::MPU6000, rate_div::UInt8)
 end
 
 #=============================================================================
-  Sensor Reading Functions (using efficient i2c_zip bulk reads)
+  Sensor Reading Functions
 =============================================================================#
 
 """
@@ -473,7 +315,6 @@ end
     read_accel_raw(mpu::MPU6000) -> Tuple{Int16, Int16, Int16}
 
 Read raw accelerometer values (X, Y, Z) as signed 16-bit integers.
-Uses a single i2c_zip transaction to read all 6 bytes.
 """
 function read_accel_raw(mpu::MPU6000)
     data = read_bytes(mpu, MPU6000Registers.ACCEL_XOUT_H, 6)
@@ -498,7 +339,6 @@ end
     read_gyro_raw(mpu::MPU6000) -> Tuple{Int16, Int16, Int16}
 
 Read raw gyroscope values (X, Y, Z) as signed 16-bit integers.
-Uses a single i2c_zip transaction to read all 6 bytes.
 """
 function read_gyro_raw(mpu::MPU6000)
     data = read_bytes(mpu, MPU6000Registers.GYRO_XOUT_H, 6)
@@ -543,7 +383,7 @@ end
 """
     read_all_raw(mpu::MPU6000) -> MPU6000Data
 
-Read all sensor data (accel, temp, gyro) as raw values in a single i2c_zip transaction.
+Read all sensor data (accel, temp, gyro) as raw values.
 Reads 14 consecutive bytes starting from ACCEL_XOUT_H.
 """
 function read_all_raw(mpu::MPU6000)
@@ -564,7 +404,7 @@ end
 """
     read_all(mpu::MPU6000) -> NamedTuple
 
-Read all sensor data with physical units in a single i2c_zip transaction.
+Read all sensor data with physical units.
 
 Returns a named tuple with:
 - accel_x, accel_y, accel_z: acceleration in g
@@ -599,7 +439,8 @@ Send `true` to the request channel to trigger a read, receive MPU6000Data on the
 
 # Example
 ```julia
-mpu = MPU6000(pi, handle)
+handle = wiringPiI2CSetup(0x68)
+mpu = MPU6000(handle)
 init!(mpu)
 
 tmpu = ThreadedMPU6000(mpu)

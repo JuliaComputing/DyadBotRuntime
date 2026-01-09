@@ -1,26 +1,25 @@
-using PiGPIO
+using WiringPi
 
 #=============================================================================
   Encoder Struct and Basic Operations
 =============================================================================#
 
 mutable struct Encoder
-    p::Pi
     pin::Int
     count::Int
     state::Bool
 end
 
-function Encoder(p::Pi, pin::Int)
-    return Encoder(p, pin, 0, PiGPIO.read(p, pin) == 1)
+function Encoder(pin::Int)
+    return Encoder(pin, 0, digitalRead(pin) == HIGH)
 end
 
 function step!(e::Encoder)
-    new_state = PiGPIO.read(e.p, e.pin)
-    if e.state && new_state == 0
+    new_state = digitalRead(e.pin)
+    if e.state && new_state == LOW
         e.count += 1
         e.state = false
-    elseif !e.state && new_state == 1
+    elseif !e.state && new_state == HIGH
         e.state = true
     end
 end
@@ -43,7 +42,7 @@ Send commands via the command channel, receive count via the response channel.
 
 # Example
 ```julia
-enc = Encoder(pi, pin)
+enc = Encoder(pin)
 tenc = ThreadedEncoder(enc, 1_000_000)  # 1ms poll interval
 
 # Read current count

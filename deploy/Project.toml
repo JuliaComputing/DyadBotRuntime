@@ -1,5 +1,5 @@
 [deps]
-PiGPIO = "bb151fc1-c6dc-5496-8ed6-07f94907e623"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Timers = "21f18d07-b854-4dab-86f0-c15a3821819a"
+WiringPi = "56b06491-0088-44d9-858f-9bc194f2c904"
