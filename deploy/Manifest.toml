@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "1f4210cd068465307a9c95f53a8d8f3e44b6baa9"
+project_hash = "87738c60e6c51224ddbda83104ac0e922de89472"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -34,12 +34,6 @@ version = "1.7.0"
 [[deps.FileWatching]]
 uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 version = "1.11.0"
-
-[[deps.JLLWrappers]]
-deps = ["Artifacts", "Preferences"]
-git-tree-sha1 = "0533e564aae234aff59ab625543145446d8b6ec2"
-uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
-version = "1.7.1"
 
 [[deps.JuliaSyntaxHighlighting]]
 deps = ["StyledStrings"]
@@ -197,18 +191,6 @@ version = "1.11.0"
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 version = "1.11.0"
-
-[[deps.WiringPi]]
-deps = ["WiringPi_jll"]
-git-tree-sha1 = "9c9733c7f8ca73698ce601fc2df625be5270f334"
-uuid = "56b06491-0088-44d9-858f-9bc194f2c904"
-version = "0.2.2"
-
-[[deps.WiringPi_jll]]
-deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "99a7679f9e8618aca73b022548c032eecdac42e1"
-uuid = "39e6258f-44e5-5edf-b49b-51a5e5bce6ab"
-version = "3.16.0+0"
 
 [[deps.Zlib_jll]]
 deps = ["Libdl"]

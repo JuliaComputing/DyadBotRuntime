@@ -1,4 +1,5 @@
-using WiringPi
+include(joinpath(@__DIR__, "i2c.jl"))
+using .I2C
 
 # MPU6000/MPU6050 Register Map
 module MPU6000Registers
@@ -152,23 +153,33 @@ end
 Wrapper struct for MPU6000/MPU6050 IMU sensor communication via I2C.
 
 # Fields
-- `handle::Int`: I2C file descriptor returned from wiringPiI2CSetup
+- `device::I2CDevice`: I2C device handle
 - `gyro_range::GyroRange`: Current gyroscope full-scale range
 - `accel_range::AccelRange`: Current accelerometer full-scale range
 """
 mutable struct MPU6000
-    handle::Int
+    device::I2C.I2CDevice
     gyro_range::GyroRange
     accel_range::AccelRange
 end
 
 """
-    MPU6000(handle::Int)
+    MPU6000(device::I2CDevice)
 
 Create an MPU6000 instance with default range settings (±250°/s gyro, ±2g accel).
 """
-function MPU6000(handle::Int)
-    return MPU6000(handle, GYRO_FS_250, ACCEL_FS_2G)
+function MPU6000(device::I2C.I2CDevice)
+    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G)
+end
+
+"""
+    MPU6000(bus::Int, address::Int=0x68)
+
+Create an MPU6000 instance by opening an I2C connection.
+"""
+function MPU6000(bus::Int, address::Int=0x68)
+    device = I2C.open_device(bus, address)
+    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G)
 end
 
 #=============================================================================
@@ -181,7 +192,7 @@ end
 Write a single byte to the specified register.
 """
 function write_byte(mpu::MPU6000, reg::UInt8, value::UInt8)
-    return wiringPiI2CWriteReg8(mpu.handle, Int(reg), Int(value))
+    return I2C.write_byte_data(mpu.device, reg, value)
 end
 
 """
@@ -190,21 +201,16 @@ end
 Read a single byte from the specified register.
 """
 function read_byte(mpu::MPU6000, reg::UInt8)
-    return UInt8(wiringPiI2CReadReg8(mpu.handle, Int(reg)))
+    return I2C.read_byte_data(mpu.device, reg)
 end
 
 """
     read_bytes(mpu::MPU6000, reg::UInt8, count::Integer) -> Vector{UInt8}
 
-Read multiple bytes starting from the specified register.
-Reads sequentially from consecutive registers.
+Read multiple bytes starting from the specified register using I2C_RDWR.
 """
 function read_bytes(mpu::MPU6000, reg::UInt8, count::Integer)
-    data = Vector{UInt8}(undef, count)
-    for i in 1:count
-        data[i] = UInt8(wiringPiI2CReadReg8(mpu.handle, Int(reg) + i - 1))
-    end
-    return data
+    return I2C.read_bytes(mpu.device, reg, count)
 end
 
 """
@@ -213,10 +219,7 @@ end
 Write multiple bytes starting at the specified register.
 """
 function write_bytes(mpu::MPU6000, reg::UInt8, data::Vector{UInt8})
-    for (i, byte) in enumerate(data)
-        wiringPiI2CWriteReg8(mpu.handle, Int(reg) + i - 1, Int(byte))
-    end
-    return 0
+    return I2C.write_bytes(mpu.device, reg, data)
 end
 
 #=============================================================================
@@ -436,21 +439,6 @@ end
 
 A thread-safe wrapper around MPU6000 that runs I2C operations in a dedicated thread.
 Send `true` to the request channel to trigger a read, receive MPU6000Data on the response channel.
-
-# Example
-```julia
-handle = wiringPiI2CSetup(0x68)
-mpu = MPU6000(handle)
-init!(mpu)
-
-tmpu = ThreadedMPU6000(mpu)
-
-# Trigger a read and get the result
-put!(tmpu.request, true)
-data = take!(tmpu.response)
-
-stop!(tmpu)
-```
 """
 mutable struct ThreadedMPU6000
     request::Channel{Bool}
@@ -463,8 +451,6 @@ end
     ThreadedMPU6000(mpu::MPU6000)
 
 Create a ThreadedMPU6000 wrapper that spawns a worker thread for I2C reads.
-The worker waits for a trigger on the request channel, performs a block read,
-and sends the result on the response channel.
 """
 function ThreadedMPU6000(mpu::MPU6000)
     request = Channel{Bool}(1)
@@ -582,4 +568,13 @@ Wake the MPU6000 from sleep mode.
 function wake!(mpu::MPU6000)
     current = read_byte(mpu, MPU6000Registers.PWR_MGMT_1)
     return write_byte(mpu, MPU6000Registers.PWR_MGMT_1, current & ~UInt8(0x40))
+end
+
+"""
+    close!(mpu::MPU6000)
+
+Close the I2C connection.
+"""
+function close!(mpu::MPU6000)
+    I2C.close_device(mpu.device)
 end

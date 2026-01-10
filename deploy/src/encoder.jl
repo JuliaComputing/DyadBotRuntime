@@ -1,31 +1,39 @@
-using WiringPi
+include(joinpath(@__DIR__, "gpio.jl"))
+using .GPIO
 
 #=============================================================================
   Encoder Struct and Basic Operations
 =============================================================================#
 
 mutable struct Encoder
-    pin::Int
+    line::GPIO.GPIOLine
     count::Int
     state::Bool
 end
 
-function Encoder(pin::Int)
-    return Encoder(pin, 0, digitalRead(pin) == HIGH)
+function Encoder(chip::GPIO.GPIOChip, pin::Int)
+    line = GPIO.get_line(chip, pin)
+    GPIO.request_input(line, "encoder")
+    initial_state = GPIO.get_value(line) == 1
+    return Encoder(line, 0, initial_state)
 end
 
 function step!(e::Encoder)
-    new_state = digitalRead(e.pin)
-    if e.state && new_state == LOW
+    new_state = GPIO.get_value(e.line)
+    if e.state && new_state == 0
         e.count += 1
         e.state = false
-    elseif !e.state && new_state == HIGH
+    elseif !e.state && new_state == 1
         e.state = true
     end
 end
 
 function reset!(e::Encoder)
     e.count = 0
+end
+
+function close!(e::Encoder)
+    GPIO.release_line(e.line)
 end
 
 #=============================================================================
@@ -42,7 +50,8 @@ Send commands via the command channel, receive count via the response channel.
 
 # Example
 ```julia
-enc = Encoder(pin)
+chip = GPIO.open_chip()
+enc = Encoder(chip, pin)
 tenc = ThreadedEncoder(enc, 1_000_000)  # 1ms poll interval
 
 # Read current count
