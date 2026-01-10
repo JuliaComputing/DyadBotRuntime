@@ -19,7 +19,7 @@ const M2A = 9
 const PWMA_LEFT = 19
 const PWMB_RIGHT = 18 # both have hardware PWM
 const LTRANS_OE = 11 # enables the 3.3V <-> 5V level translator
-const STBY_PIN = 0
+const STBY_PIN = 26
 
 const PWM_FREQ_HZ = 1000  # 1kHz PWM frequency
 const PWM_MAX_VALUE = 1024  # PWM duty cycle range (0-1024)
