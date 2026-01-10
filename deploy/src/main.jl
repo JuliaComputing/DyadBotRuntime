@@ -97,12 +97,15 @@ function (@main)(args)::Cint
     # Setup GPIO output lines for motor direction
     ain1_line = GPIO.get_line(gpio_chip, AIN1)
     GPIO.request_output(ain1_line, "motor_ain1", 0)
+    println(Core.stdout, "ain1 opened")
 
     bin1_line = GPIO.get_line(gpio_chip, BIN1)
     GPIO.request_output(bin1_line, "motor_bin1", 0)
+    println(Core.stdout, "bin1 opened")
 
     stby_line = GPIO.get_line(gpio_chip, STBY_PIN)
     GPIO.request_output(stby_line, "motor_stby", 0)
+    println(Core.stdout, "stby opened")
 
     println(Core.stdout, "gpio lines configured")
 
