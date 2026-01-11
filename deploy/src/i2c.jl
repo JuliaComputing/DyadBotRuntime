@@ -14,6 +14,90 @@ export read_block_data, write_block_data
 export read_bytes, read_bytes!, write_bytes
 
 #=============================================================================
+  I2C Device Handle
+=============================================================================#
+
+const I2C_BUFFER_SIZE = 64  # Max buffer for read_bytes/write_bytes
+
+mutable struct I2CDevice
+    fd::RawFD
+    bus::Int
+    address::UInt8
+    path::String
+    # Pre-allocated buffers (shared between SMBus and RDWR operations)
+    ioctl_buf::Vector{UInt8}   # For SMBusIoctlData or I2CRdwrIoctlData
+    msgs_buf::Vector{UInt8}    # For I2CMsg array (2 msgs max)
+    data_buf::Vector{UInt8}    # SMBus data (34 bytes) or RDWR reg+data
+end
+
+#=============================================================================
+  Error Code Handling
+=============================================================================#
+
+# Get last errno value
+get_errno() = ccall(:__errno_location, Ptr{Cint}, ())[]
+
+# Common errno values for I2C operations (Linux)
+const ERRNO_NAMES = Dict{Cint, Tuple{String, String}}(
+    1   => ("EPERM",      "Operation not permitted - check process privileges"),
+    2   => ("ENOENT",     "No such file or directory - I2C bus device does not exist"),
+    5   => ("EIO",        "I/O error - bus communication failure, check wiring and pull-ups"),
+    6   => ("ENXIO",      "No such device or address - device did not ACK, check address and connections"),
+    9   => ("EBADF",      "Bad file descriptor - device handle is invalid or closed"),
+    11  => ("EAGAIN",     "Resource temporarily unavailable - retry the operation"),
+    13  => ("EACCES",     "Permission denied - add user to i2c group or run as root"),
+    14  => ("EFAULT",     "Bad address - internal buffer error"),
+    16  => ("EBUSY",      "Device or resource busy - another process is using the I2C bus"),
+    19  => ("ENODEV",     "No such device - I2C adapter not found or not loaded"),
+    22  => ("EINVAL",     "Invalid argument - check address range (0x03-0x77) and parameters"),
+    62  => ("ETIME",      "Timer expired - device took too long to respond"),
+    84  => ("EILSEQ",     "Illegal byte sequence - protocol error on bus"),
+    110 => ("ETIMEDOUT",  "Connection timed out - device not responding, check power and wiring"),
+    121 => ("EREMOTEIO",  "Remote I/O error - NACK received, device rejected transfer"),
+)
+
+"""
+    format_i2c_error(operation::String, dev::Union{I2CDevice, Nothing}, errno::Cint;
+                     reg::Union{UInt8, Nothing}=nothing, value::Union{UInt8, Nothing}=nothing) -> String
+
+Format a detailed error message for I2C operations including errno interpretation.
+"""
+function format_i2c_error(operation::String, dev::Union{I2CDevice, Nothing}, errno::Cint;
+                          reg::Union{UInt8, Nothing}=nothing, value::Union{UInt8, Nothing}=nothing)
+    # Build context string
+    ctx_parts = String[]
+    if dev !== nothing
+        push!(ctx_parts, "bus=$(dev.bus)")
+        push!(ctx_parts, "addr=0x$(string(dev.address, base=16, pad=2))")
+    end
+    if reg !== nothing
+        push!(ctx_parts, "reg=0x$(string(reg, base=16, pad=2))")
+    end
+    if value !== nothing
+        push!(ctx_parts, "value=0x$(string(value, base=16, pad=2))")
+    end
+    ctx = isempty(ctx_parts) ? "" : " [$(join(ctx_parts, ", "))]"
+
+    # Look up errno details
+    if haskey(ERRNO_NAMES, errno)
+        name, desc = ERRNO_NAMES[errno]
+        return "I2C $operation failed$ctx: $name (errno=$errno) - $desc"
+    else
+        return "I2C $operation failed$ctx: errno=$errno (unknown error code)"
+    end
+end
+
+"""
+    i2c_error(operation::String, dev::Union{I2CDevice, Nothing}; kwargs...)
+
+Throw an error with detailed I2C diagnostics.
+"""
+function i2c_error(operation::String, dev::Union{I2CDevice, Nothing}; kwargs...)
+    errno = get_errno()
+    error(format_i2c_error(operation, dev, errno; kwargs...))
+end
+
+#=============================================================================
   ioctl Constants
 =============================================================================#
 
@@ -76,23 +160,6 @@ struct I2CRdwrIoctlData
 end
 
 #=============================================================================
-  I2C Device Handle
-=============================================================================#
-
-const I2C_BUFFER_SIZE = 64  # Max buffer for read_bytes/write_bytes
-
-mutable struct I2CDevice
-    fd::RawFD
-    bus::Int
-    address::UInt8
-    path::String
-    # Pre-allocated buffers (shared between SMBus and RDWR operations)
-    ioctl_buf::Vector{UInt8}   # For SMBusIoctlData or I2CRdwrIoctlData
-    msgs_buf::Vector{UInt8}    # For I2CMsg array (2 msgs max)
-    data_buf::Vector{UInt8}    # SMBus data (34 bytes) or RDWR reg+data
-end
-
-#=============================================================================
   ioctl Wrapper
 =============================================================================#
 
@@ -111,7 +178,13 @@ function open_device(bus::Int, address::Integer)
     path = "/dev/i2c-$bus"
     fd = ccall(:open, Cint, (Cstring, Cint), path, 0x0002)  # O_RDWR = 0x0002
     if fd < 0
-        error("Failed to open I2C device: $path")
+        errno = get_errno()
+        if haskey(ERRNO_NAMES, errno)
+            name, desc = ERRNO_NAMES[errno]
+            error("I2C open_device failed [path=$path]: $name (errno=$errno) - $desc")
+        else
+            error("I2C open_device failed [path=$path]: errno=$errno (unknown error code)")
+        end
     end
 
     raw_fd = RawFD(fd)
@@ -120,8 +193,14 @@ function open_device(bus::Int, address::Integer)
     # Set slave address
     ret = ioctl(raw_fd, UInt(I2C_SLAVE), Clong(addr))
     if ret < 0
+        errno = get_errno()
         ccall(:close, Cint, (Cint,), fd)
-        error("Failed to set I2C slave address: 0x$(string(addr, base=16))")
+        if haskey(ERRNO_NAMES, errno)
+            name, desc = ERRNO_NAMES[errno]
+            error("I2C set_slave_address failed [bus=$bus, addr=0x$(string(addr, base=16, pad=2))]: $name (errno=$errno) - $desc")
+        else
+            error("I2C set_slave_address failed [bus=$bus, addr=0x$(string(addr, base=16, pad=2))]: errno=$errno (unknown error code)")
+        end
     end
 
     # Pre-allocate shared buffers
@@ -149,10 +228,12 @@ end
     i2c_read(dev::I2CDevice, buf::Vector{UInt8}) -> Int
 
 Read bytes from I2C device into buffer. Returns number of bytes read.
+Throws an error with detailed diagnostics on failure.
 """
 function i2c_read(dev::I2CDevice, buf::Vector{UInt8})
     n = ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t),
               Base.cconvert(Cint, dev.fd), buf, length(buf))
+    n < 0 && i2c_error("read", dev)
     return Int(n)
 end
 
@@ -160,10 +241,12 @@ end
     i2c_write(dev::I2CDevice, buf::Vector{UInt8}) -> Int
 
 Write bytes to I2C device. Returns number of bytes written.
+Throws an error with detailed diagnostics on failure.
 """
 function i2c_write(dev::I2CDevice, buf::Vector{UInt8})
     n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t),
               Base.cconvert(Cint, dev.fd), buf, length(buf))
+    n < 0 && i2c_error("write", dev)
     return Int(n)
 end
 
@@ -190,17 +273,19 @@ Read a single byte from the device (no register address).
 """
 function read_byte(dev::I2CDevice)
     ret = smbus_access(dev, I2C_SMBUS_READ, UInt8(0), I2C_SMBUS_BYTE)
-    ret < 0 && error("SMBus read_byte failed")
+    ret < 0 && i2c_error("read_byte", dev)
     return dev.data_buf[1]
 end
 
 """
-    write_byte(dev::I2CDevice, value::UInt8) -> Int
+    write_byte(dev::I2CDevice, value::UInt8)
 
 Write a single byte to the device (no register address).
 """
 function write_byte(dev::I2CDevice, value::UInt8)
-    return smbus_access(dev, I2C_SMBUS_WRITE, value, I2C_SMBUS_BYTE)
+    ret = smbus_access(dev, I2C_SMBUS_WRITE, value, I2C_SMBUS_BYTE)
+    ret < 0 && i2c_error("write_byte", dev; value=value)
+    return ret
 end
 
 """
@@ -210,7 +295,7 @@ Read a byte from a specific register.
 """
 function read_byte_data(dev::I2CDevice, reg::UInt8)
     ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_BYTE_DATA)
-    ret < 0 && error("SMBus read_byte_data failed for register 0x$(string(reg, base=16))")
+    ret < 0 && i2c_error("read_byte_data", dev; reg=reg)
     return dev.data_buf[1]
 end
 
@@ -221,7 +306,9 @@ Write a byte to a specific register.
 """
 function write_byte_data(dev::I2CDevice, reg::UInt8, value::UInt8)
     dev.data_buf[1] = value
-    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_BYTE_DATA)
+    ret = smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_BYTE_DATA)
+    ret < 0 && i2c_error("write_byte_data", dev; reg=reg, value=value)
+    return ret
 end
 
 """
@@ -231,7 +318,7 @@ Read a 16-bit word from a specific register.
 """
 function read_word_data(dev::I2CDevice, reg::UInt8)
     ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_WORD_DATA)
-    ret < 0 && error("SMBus read_word_data failed for register 0x$(string(reg, base=16))")
+    ret < 0 && i2c_error("read_word_data", dev; reg=reg)
     return UInt16(dev.data_buf[1]) | (UInt16(dev.data_buf[2]) << 8)
 end
 
@@ -243,7 +330,9 @@ Write a 16-bit word to a specific register.
 function write_word_data(dev::I2CDevice, reg::UInt8, value::UInt16)
     dev.data_buf[1] = UInt8(value & 0xFF)
     dev.data_buf[2] = UInt8((value >> 8) & 0xFF)
-    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_WORD_DATA)
+    ret = smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_WORD_DATA)
+    ret < 0 && i2c_error("write_word_data", dev; reg=reg)
+    return ret
 end
 
 #=============================================================================
@@ -272,7 +361,7 @@ function read_bytes!(dev::I2CDevice, reg::UInt8, dest::AbstractVector{UInt8})
     unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
 
     ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
-    ret < 0 && error("I2C_RDWR read failed for register 0x$(string(reg, base=16))")
+    ret < 0 && i2c_error("read_bytes", dev; reg=reg)
 
     return count
 end
@@ -311,7 +400,7 @@ function write_bytes(dev::I2CDevice, reg::UInt8, data::AbstractVector{UInt8})
     unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
 
     ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
-    ret < 0 && error("I2C_RDWR write failed for register 0x$(string(reg, base=16))")
+    ret < 0 && i2c_error("write_bytes", dev; reg=reg)
 
     return ret
 end
