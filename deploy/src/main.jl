@@ -132,8 +132,8 @@ function (@main)(args)::Cint
     println(Core.stdout, "imu startup done")
 
     timu = ThreadedMPU6000(imu)
-    tenc_1a = ThreadedEncoder(Encoder(gpio, M1A), 1_000)
-    tenc_2a = ThreadedEncoder(Encoder(gpio, M2A), 1_000)
+    tenc_1a = ThreadedEncoder(Encoder(gpio, M1A))
+    tenc_2a = ThreadedEncoder(Encoder(gpio, M2A))
 
     ctrl = BalanceController()
 
