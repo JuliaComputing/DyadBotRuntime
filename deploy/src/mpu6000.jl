@@ -156,11 +156,13 @@ Wrapper struct for MPU6000/MPU6050 IMU sensor communication via I2C.
 - `device::I2CDevice`: I2C device handle
 - `gyro_range::GyroRange`: Current gyroscope full-scale range
 - `accel_range::AccelRange`: Current accelerometer full-scale range
+- `read_buf::Vector{UInt8}`: Pre-allocated buffer for sensor reads
 """
 mutable struct MPU6000
     device::I2C.I2CDevice
     gyro_range::GyroRange
     accel_range::AccelRange
+    read_buf::Vector{UInt8}
 end
 
 """
@@ -169,7 +171,7 @@ end
 Create an MPU6000 instance with default range settings (±250°/s gyro, ±2g accel).
 """
 function MPU6000(device::I2C.I2CDevice)
-    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G)
+    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G, zeros(UInt8, 14))
 end
 
 """
@@ -179,7 +181,7 @@ Create an MPU6000 instance by opening an I2C connection.
 """
 function MPU6000(bus::Int, address::Int=0x68)
     device = I2C.open_device(bus, address)
-    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G)
+    return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G, zeros(UInt8, 14))
 end
 
 #=============================================================================
@@ -320,10 +322,10 @@ end
 Read raw accelerometer values (X, Y, Z) as signed 16-bit integers.
 """
 function read_accel_raw(mpu::MPU6000)
-    data = read_bytes(mpu, MPU6000Registers.ACCEL_XOUT_H, 6)
-    ax = parse_int16_be(data, 1)
-    ay = parse_int16_be(data, 3)
-    az = parse_int16_be(data, 5)
+    I2C.read_bytes!(mpu.device, MPU6000Registers.ACCEL_XOUT_H, @view mpu.read_buf[1:6])
+    ax = parse_int16_be(mpu.read_buf, 1)
+    ay = parse_int16_be(mpu.read_buf, 3)
+    az = parse_int16_be(mpu.read_buf, 5)
     return (ax, ay, az)
 end
 
@@ -344,10 +346,10 @@ end
 Read raw gyroscope values (X, Y, Z) as signed 16-bit integers.
 """
 function read_gyro_raw(mpu::MPU6000)
-    data = read_bytes(mpu, MPU6000Registers.GYRO_XOUT_H, 6)
-    gx = parse_int16_be(data, 1)
-    gy = parse_int16_be(data, 3)
-    gz = parse_int16_be(data, 5)
+    I2C.read_bytes!(mpu.device, MPU6000Registers.GYRO_XOUT_H, @view mpu.read_buf[1:6])
+    gx = parse_int16_be(mpu.read_buf, 1)
+    gy = parse_int16_be(mpu.read_buf, 3)
+    gz = parse_int16_be(mpu.read_buf, 5)
     return (gx, gy, gz)
 end
 
@@ -368,8 +370,8 @@ end
 Read raw temperature value as a signed 16-bit integer.
 """
 function read_temp_raw(mpu::MPU6000)
-    data = read_bytes(mpu, MPU6000Registers.TEMP_OUT_H, 2)
-    return parse_int16_be(data, 1)
+    I2C.read_bytes!(mpu.device, MPU6000Registers.TEMP_OUT_H, @view mpu.read_buf[1:2])
+    return parse_int16_be(mpu.read_buf, 1)
 end
 
 """
@@ -388,19 +390,20 @@ end
 
 Read all sensor data (accel, temp, gyro) as raw values.
 Reads 14 consecutive bytes starting from ACCEL_XOUT_H.
+Uses pre-allocated buffer for zero-allocation reads.
 """
 function read_all_raw(mpu::MPU6000)
     # Read all 14 bytes: ACCEL (6) + TEMP (2) + GYRO (6)
-    data = read_bytes(mpu, MPU6000Registers.ACCEL_XOUT_H, 14)
+    I2C.read_bytes!(mpu.device, MPU6000Registers.ACCEL_XOUT_H, mpu.read_buf)
 
     return MPU6000Data(
-        parse_int16_be(data, 1),   # ACCEL_XOUT
-        parse_int16_be(data, 3),   # ACCEL_YOUT
-        parse_int16_be(data, 5),   # ACCEL_ZOUT
-        parse_int16_be(data, 7),   # TEMP_OUT
-        parse_int16_be(data, 9),   # GYRO_XOUT
-        parse_int16_be(data, 11),  # GYRO_YOUT
-        parse_int16_be(data, 13)   # GYRO_ZOUT
+        parse_int16_be(mpu.read_buf, 1),   # ACCEL_XOUT
+        parse_int16_be(mpu.read_buf, 3),   # ACCEL_YOUT
+        parse_int16_be(mpu.read_buf, 5),   # ACCEL_ZOUT
+        parse_int16_be(mpu.read_buf, 7),   # TEMP_OUT
+        parse_int16_be(mpu.read_buf, 9),   # GYRO_XOUT
+        parse_int16_be(mpu.read_buf, 11),  # GYRO_YOUT
+        parse_int16_be(mpu.read_buf, 13)   # GYRO_ZOUT
     )
 end
 

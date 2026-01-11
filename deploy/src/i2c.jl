@@ -11,7 +11,7 @@ export I2CDevice
 export open_device, close_device
 export read_byte, write_byte, read_byte_data, write_byte_data
 export read_block_data, write_block_data
-export read_bytes, write_bytes
+export read_bytes, read_bytes!, write_bytes
 
 #=============================================================================
   ioctl Constants
@@ -50,17 +50,13 @@ const I2C_SMBUS_BLOCK_MAX = 32
   Data Structures for ioctl
 =============================================================================#
 
-# SMBus data union (we use the largest member)
-struct SMBusData
-    block::NTuple{34, UInt8}  # block[0] = length, block[1..32] = data
-end
-
-# SMBus ioctl arguments
+# SMBus ioctl arguments (matches C struct layout with padding)
 struct SMBusIoctlData
     read_write::UInt8
     command::UInt8
+    _pad::UInt16
     size::UInt32
-    data::Ptr{SMBusData}
+    data::Ptr{UInt8}
 end
 
 # I2C message structure for I2C_RDWR
@@ -68,6 +64,7 @@ struct I2CMsg
     addr::UInt16
     flags::UInt16
     len::UInt16
+    _pad::UInt16
     buf::Ptr{UInt8}
 end
 
@@ -75,37 +72,31 @@ end
 struct I2CRdwrIoctlData
     msgs::Ptr{I2CMsg}
     nmsgs::UInt32
+    _pad::UInt32
 end
 
 #=============================================================================
   I2C Device Handle
 =============================================================================#
 
+const I2C_BUFFER_SIZE = 64  # Max buffer for read_bytes/write_bytes
+
 mutable struct I2CDevice
     fd::RawFD
     bus::Int
     address::UInt8
     path::String
+    # Pre-allocated buffers (shared between SMBus and RDWR operations)
+    ioctl_buf::Vector{UInt8}   # For SMBusIoctlData or I2CRdwrIoctlData
+    msgs_buf::Vector{UInt8}    # For I2CMsg array (2 msgs max)
+    data_buf::Vector{UInt8}    # SMBus data (34 bytes) or RDWR reg+data
 end
 
 #=============================================================================
   ioctl Wrapper
 =============================================================================#
 
-"""
-    ioctl(fd::RawFD, request::UInt, arg) -> Int
-
-Low-level ioctl wrapper.
-"""
-function ioctl(fd::RawFD, request::UInt, arg)
-    return ccall(:ioctl, Cint, (Cint, Culong, Ptr{Cvoid}),
-                 Base.cconvert(Cint, fd), request, arg)
-end
-
-function ioctl(fd::RawFD, request::UInt, arg::Integer)
-    return ccall(:ioctl, Cint, (Cint, Culong, Clong),
-                 Base.cconvert(Cint, fd), request, arg)
-end
+ioctl(fd::RawFD, request, arg) = ccall(:ioctl, Cint, (Cint, Culong, Clong), fd, request, arg)
 
 #=============================================================================
   Device Operations
@@ -133,7 +124,12 @@ function open_device(bus::Int, address::Integer)
         error("Failed to set I2C slave address: 0x$(string(addr, base=16))")
     end
 
-    return I2CDevice(raw_fd, bus, addr, path)
+    # Pre-allocate shared buffers
+    ioctl_buf = zeros(UInt8, sizeof(SMBusIoctlData))  # same size as I2CRdwrIoctlData
+    msgs_buf = zeros(UInt8, 2 * sizeof(I2CMsg))
+    data_buf = zeros(UInt8, 1 + I2C_BUFFER_SIZE)  # reg byte + data
+
+    return I2CDevice(raw_fd, bus, addr, path, ioctl_buf, msgs_buf, data_buf)
 end
 
 """
@@ -176,15 +172,15 @@ end
 =============================================================================#
 
 """
-    smbus_access(dev::I2CDevice, read_write::UInt8, command::UInt8,
-                 size::UInt32, data::Ref{SMBusData}) -> Int
+    smbus_access(dev::I2CDevice, read_write::UInt8, command::UInt8, size::UInt32) -> Int
 
-Perform an SMBus transaction.
+Perform an SMBus transaction using pre-allocated buffers.
+Data is read from / written to dev.data_buf.
 """
-function smbus_access(dev::I2CDevice, read_write::UInt8, command::UInt8,
-                      size::UInt32, data_ptr::Ptr{SMBusData})
-    args = Ref(SMBusIoctlData(read_write, command, size, data_ptr))
-    return ioctl(dev.fd, UInt(I2C_SMBUS), args)
+function smbus_access(dev::I2CDevice, read_write::UInt8, command::UInt8, size::UInt32)
+    args = SMBusIoctlData(read_write, command, UInt16(0), size, pointer(dev.data_buf))
+    unsafe_store!(Ptr{SMBusIoctlData}(pointer(dev.ioctl_buf)), args)
+    return ioctl(dev.fd, UInt(I2C_SMBUS), pointer(dev.ioctl_buf))
 end
 
 """
@@ -193,12 +189,9 @@ end
 Read a single byte from the device (no register address).
 """
 function read_byte(dev::I2CDevice)
-    data = Ref(SMBusData(ntuple(_ -> UInt8(0), 34)))
-    ret = smbus_access(dev, I2C_SMBUS_READ, UInt8(0), I2C_SMBUS_BYTE, Base.unsafe_convert(Ptr{SMBusData}, data))
-    if ret < 0
-        error("SMBus read_byte failed")
-    end
-    return data[].block[1]
+    ret = smbus_access(dev, I2C_SMBUS_READ, UInt8(0), I2C_SMBUS_BYTE)
+    ret < 0 && error("SMBus read_byte failed")
+    return dev.data_buf[1]
 end
 
 """
@@ -207,7 +200,7 @@ end
 Write a single byte to the device (no register address).
 """
 function write_byte(dev::I2CDevice, value::UInt8)
-    return smbus_access(dev, I2C_SMBUS_WRITE, value, I2C_SMBUS_BYTE, Ptr{SMBusData}(0))
+    return smbus_access(dev, I2C_SMBUS_WRITE, value, I2C_SMBUS_BYTE)
 end
 
 """
@@ -216,12 +209,9 @@ end
 Read a byte from a specific register.
 """
 function read_byte_data(dev::I2CDevice, reg::UInt8)
-    data = Ref(SMBusData(ntuple(_ -> UInt8(0), 34)))
-    ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_BYTE_DATA, Base.unsafe_convert(Ptr{SMBusData}, data))
-    if ret < 0
-        error("SMBus read_byte_data failed for register 0x$(string(reg, base=16))")
-    end
-    return data[].block[1]
+    ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_BYTE_DATA)
+    ret < 0 && error("SMBus read_byte_data failed for register 0x$(string(reg, base=16))")
+    return dev.data_buf[1]
 end
 
 """
@@ -230,8 +220,8 @@ end
 Write a byte to a specific register.
 """
 function write_byte_data(dev::I2CDevice, reg::UInt8, value::UInt8)
-    data = Ref(SMBusData(ntuple(i -> i == 1 ? value : UInt8(0), 34)))
-    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_BYTE_DATA, Base.unsafe_convert(Ptr{SMBusData}, data))
+    dev.data_buf[1] = value
+    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_BYTE_DATA)
 end
 
 """
@@ -240,12 +230,9 @@ end
 Read a 16-bit word from a specific register.
 """
 function read_word_data(dev::I2CDevice, reg::UInt8)
-    data = Ref(SMBusData(ntuple(_ -> UInt8(0), 34)))
-    ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_WORD_DATA, Base.unsafe_convert(Ptr{SMBusData}, data))
-    if ret < 0
-        error("SMBus read_word_data failed for register 0x$(string(reg, base=16))")
-    end
-    return UInt16(data[].block[1]) | (UInt16(data[].block[2]) << 8)
+    ret = smbus_access(dev, I2C_SMBUS_READ, reg, I2C_SMBUS_WORD_DATA)
+    ret < 0 && error("SMBus read_word_data failed for register 0x$(string(reg, base=16))")
+    return UInt16(dev.data_buf[1]) | (UInt16(dev.data_buf[2]) << 8)
 end
 
 """
@@ -254,17 +241,9 @@ end
 Write a 16-bit word to a specific register.
 """
 function write_word_data(dev::I2CDevice, reg::UInt8, value::UInt16)
-    block = ntuple(34) do i
-        if i == 1
-            UInt8(value & 0xFF)
-        elseif i == 2
-            UInt8((value >> 8) & 0xFF)
-        else
-            UInt8(0)
-        end
-    end
-    data = Ref(SMBusData(block))
-    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_WORD_DATA, Base.unsafe_convert(Ptr{SMBusData}, data))
+    dev.data_buf[1] = UInt8(value & 0xFF)
+    dev.data_buf[2] = UInt8((value >> 8) & 0xFF)
+    return smbus_access(dev, I2C_SMBUS_WRITE, reg, I2C_SMBUS_WORD_DATA)
 end
 
 #=============================================================================
@@ -272,45 +251,67 @@ end
 =============================================================================#
 
 """
-    read_bytes(dev::I2CDevice, reg::UInt8, count::Int) -> Vector{UInt8}
+    read_bytes!(dev::I2CDevice, reg::UInt8, dest::AbstractVector{UInt8}) -> Int
 
-Read multiple bytes starting from a register using I2C_RDWR.
-This performs a write (register address) followed by a read in one transaction.
+Read bytes into dest buffer starting from a register. Returns number of bytes read.
 """
-function read_bytes(dev::I2CDevice, reg::UInt8, count::Int)
-    write_buf = [reg]
-    read_buf = Vector{UInt8}(undef, count)
+function read_bytes!(dev::I2CDevice, reg::UInt8, dest::AbstractVector{UInt8})
+    count = length(dest)
+    count > I2C_BUFFER_SIZE && error("read_bytes!: count $count exceeds buffer size $I2C_BUFFER_SIZE")
 
-    msgs = [
-        I2CMsg(dev.address, UInt16(0), UInt16(1), pointer(write_buf)),
-        I2CMsg(dev.address, I2C_M_RD, UInt16(count), pointer(read_buf))
-    ]
+    # Store register byte
+    dev.data_buf[1] = reg
 
-    rdwr_data = Ref(I2CRdwrIoctlData(pointer(msgs), UInt32(2)))
+    # Pack two I2CMsg structs
+    msgs_ptr = Ptr{I2CMsg}(pointer(dev.msgs_buf))
+    unsafe_store!(msgs_ptr, I2CMsg(dev.address, UInt16(0), UInt16(1), UInt16(0), pointer(dev.data_buf)), 1)
+    unsafe_store!(msgs_ptr, I2CMsg(dev.address, I2C_M_RD, UInt16(count), UInt16(0), pointer(dest)), 2)
 
-    ret = ioctl(dev.fd, UInt(I2C_RDWR), rdwr_data)
-    if ret < 0
-        error("I2C_RDWR read failed for register 0x$(string(reg, base=16))")
-    end
+    # Pack rdwr ioctl data
+    rdwr = I2CRdwrIoctlData(Ptr{I2CMsg}(pointer(dev.msgs_buf)), UInt32(2), UInt32(0))
+    unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
 
-    return read_buf
+    ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
+    ret < 0 && error("I2C_RDWR read failed for register 0x$(string(reg, base=16))")
+
+    return count
 end
 
 """
-    write_bytes(dev::I2CDevice, reg::UInt8, data::Vector{UInt8}) -> Int
+    read_bytes(dev::I2CDevice, reg::UInt8, count::Int) -> Vector{UInt8}
+
+Read multiple bytes starting from a register. Allocates a new vector.
+For zero-allocation, use read_bytes! with a pre-allocated buffer.
+"""
+function read_bytes(dev::I2CDevice, reg::UInt8, count::Int)
+    dest = Vector{UInt8}(undef, count)
+    read_bytes!(dev, reg, dest)
+    return dest
+end
+
+"""
+    write_bytes(dev::I2CDevice, reg::UInt8, data::AbstractVector{UInt8}) -> Int
 
 Write multiple bytes starting at a register.
 """
-function write_bytes(dev::I2CDevice, reg::UInt8, data::Vector{UInt8})
-    buf = vcat([reg], data)
+function write_bytes(dev::I2CDevice, reg::UInt8, data::AbstractVector{UInt8})
+    count = length(data)
+    count > I2C_BUFFER_SIZE && error("write_bytes: count $count exceeds buffer size $I2C_BUFFER_SIZE")
 
-    msgs = [I2CMsg(dev.address, UInt16(0), UInt16(length(buf)), pointer(buf))]
-    rdwr_data = Ref(I2CRdwrIoctlData(pointer(msgs), UInt32(1)))
+    # Pack register + data into data_buf
+    dev.data_buf[1] = reg
+    copyto!(dev.data_buf, 2, data, 1, count)
 
-    ret = ioctl(dev.fd, UInt(I2C_RDWR), rdwr_data)
-    if ret < 0
-        error("I2C_RDWR write failed for register 0x$(string(reg, base=16))")
-    end
+    # Pack single I2CMsg
+    msgs_ptr = Ptr{I2CMsg}(pointer(dev.msgs_buf))
+    unsafe_store!(msgs_ptr, I2CMsg(dev.address, UInt16(0), UInt16(count + 1), UInt16(0), pointer(dev.data_buf)), 1)
+
+    # Pack rdwr ioctl data
+    rdwr = I2CRdwrIoctlData(Ptr{I2CMsg}(pointer(dev.msgs_buf)), UInt32(1), UInt32(0))
+    unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
+
+    ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
+    ret < 0 && error("I2C_RDWR write failed for register 0x$(string(reg, base=16))")
 
     return ret
 end

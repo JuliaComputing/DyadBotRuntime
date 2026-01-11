@@ -1,4 +1,4 @@
-include(joinpath(@__DIR__, "gpio.jl"))
+# Uses GPIO module (must be included before this file)
 using .GPIO
 
 #=============================================================================
@@ -6,26 +6,59 @@ using .GPIO
 =============================================================================#
 
 mutable struct Encoder
-    line::GPIO.GPIOLine
+    pin::GPIO.GPIOPin
     count::Int
-    state::Bool
 end
 
-function Encoder(chip::GPIO.GPIOChip, pin::Int)
-    line = GPIO.get_line(chip, pin)
-    GPIO.request_input(line, "encoder")
-    initial_state = GPIO.get_value(line) == 1
-    return Encoder(line, 0, initial_state)
+"""
+    Encoder(gpio::GPIOController, pin_num::Int; edge::EdgeType=EDGE_FALLING)
+
+Create an encoder that counts edges on the specified pin.
+Uses interrupt-based edge detection (no polling).
+"""
+function Encoder(gpio::GPIO.GPIOController, pin_num::Int; edge::GPIO.EdgeType=GPIO.EDGE_FALLING)
+    pin = GPIO.request_input_edge(gpio, pin_num, "encoder", edge)
+    return Encoder(pin, 0)
 end
 
-function step!(e::Encoder)
-    new_state = GPIO.get_value(e.line)
-    if e.state && new_state == 0
+"""
+    wait_edge!(e::Encoder, timeout_ms::Int=-1) -> Union{GPIO.GPIOEvent, Nothing}
+
+Wait for an edge event. Returns the event or nothing on timeout.
+Increments the encoder count on each edge.
+"""
+function wait_edge!(e::Encoder, timeout_ms::Int=-1)
+    if GPIO.poll_event(e.pin, timeout_ms)
+        event = GPIO.read_event(e.pin)
         e.count += 1
-        e.state = false
-    elseif !e.state && new_state == 1
-        e.state = true
+        return event
     end
+    return nothing
+end
+
+"""
+    drain_events(pin::GPIO.GPIOPin) -> Int
+
+Read all pending events from a pin without blocking. Returns number of events drained.
+"""
+function drain_events(pin::GPIO.GPIOPin)
+    n = 0
+    while GPIO.poll_event(pin, 0)
+        GPIO.read_event(pin)
+        n += 1
+    end
+    return n
+end
+
+"""
+    drain_events!(e::Encoder) -> Int
+
+Read all pending events without blocking. Returns number of events drained.
+"""
+function drain_events!(e::Encoder)
+    n = drain_events(e.pin)
+    e.count += n
+    return n
 end
 
 function reset!(e::Encoder)
@@ -33,7 +66,7 @@ function reset!(e::Encoder)
 end
 
 function close!(e::Encoder)
-    GPIO.release_line(e.line)
+    close(e.pin)
 end
 
 #=============================================================================
@@ -45,72 +78,79 @@ end
 """
     ThreadedEncoder
 
-A thread-safe wrapper around Encoder that polls at a specified interval.
-Send commands via the command channel, receive count via the response channel.
+A thread-safe wrapper around Encoder using two dedicated threads:
+- Event thread: continuously reads edge events and atomically updates count
+- Command thread: handles read/reset commands with immediate response
 
 # Example
 ```julia
-chip = GPIO.open_chip()
+chip = GPIO.open_gpio()
 enc = Encoder(chip, pin)
-tenc = ThreadedEncoder(enc, 1_000_000)  # 1ms poll interval
+tenc = ThreadedEncoder(enc)
 
-# Read current count
-put!(tenc.command, CMD_READ)
-count = take!(tenc.response)
+# Read current count (immediate response)
+count = read(tenc)
 
 # Reset count (returns old count)
-put!(tenc.command, CMD_RESET)
-old_count = take!(tenc.response)
+old_count = reset!(tenc)
 
 stop!(tenc)
 ```
 """
 mutable struct ThreadedEncoder
+    count::Threads.Atomic{Int}
     command::Channel{EncoderCommand}
     response::Channel{Int}
-    worker::Task
+    event_worker::Task
+    command_worker::Task
     running::Threads.Atomic{Bool}
 end
 
 """
-    ThreadedEncoder(enc::Encoder, poll_interval_ns::Int)
+    ThreadedEncoder(enc::Encoder)
 
-Create a ThreadedEncoder that polls the encoder at the specified interval (in nanoseconds).
-The worker thread continuously polls the encoder and responds to commands.
+Create a ThreadedEncoder with separate event and command threads.
 """
-function ThreadedEncoder(enc::Encoder, poll_interval_ns::Int)
+function ThreadedEncoder(enc::Encoder)
+    count = Threads.Atomic{Int}(enc.count)
     command = Channel{EncoderCommand}(1)
     response = Channel{Int}(1)
     running = Threads.Atomic{Bool}(true)
 
-    worker = Threads.@spawn begin
-        next_poll = time_ns()
+    # Event thread: continuously drain all pending events
+    event_worker = Threads.@spawn begin
         while running[]
-            # Poll encoder
-            now = time_ns()
-            if now >= next_poll
-                step!(enc)
-                next_poll = now + poll_interval_ns
-            end
-
-            # Check for commands (non-blocking)
-            if isready(command)
-                cmd = take!(command)
-                if cmd == CMD_READ
-                    put!(response, enc.count)
-                elseif cmd == CMD_RESET
-                    old_count = enc.count
-                    reset!(enc)
-                    put!(response, old_count)
-                elseif cmd == CMD_STOP
-                    running[] = false
-                    break
-                end
+            # Wait for at least one event (with timeout to check running flag)
+            if GPIO.poll_event(enc.pin, 100)
+                n = drain_events(enc.pin)
+                Threads.atomic_add!(count, n)
             end
         end
     end
 
-    return ThreadedEncoder(command, response, worker, running)
+    # Command thread: handle commands with immediate response
+    command_worker = Threads.@spawn begin
+        while running[]
+            cmd = try
+                take!(command)
+            catch e
+                e isa InvalidStateException && break
+                rethrow()
+            end
+
+            if cmd == CMD_READ
+                put!(response, count[])
+            elseif cmd == CMD_RESET
+                old_count = Threads.atomic_xchg!(count, 0)
+                put!(response, old_count)
+            elseif cmd == CMD_STOP
+                running[] = false
+                break
+            end
+        end
+    end
+
+    return ThreadedEncoder(count, command, response, event_worker, command_worker, running)
 end
 
 """
@@ -136,14 +176,15 @@ end
 """
     stop!(tenc::ThreadedEncoder)
 
-Stop the worker thread.
+Stop both worker threads.
 """
 function stop!(tenc::ThreadedEncoder)
     if tenc.running[]
-        put!(tenc.command, CMD_STOP)
-        wait(tenc.worker)
+        tenc.running[] = false
+        close(tenc.command)  # Unblocks command worker
+        wait(tenc.event_worker)
+        wait(tenc.command_worker)
     end
-    close(tenc.command)
     close(tenc.response)
     return nothing
 end

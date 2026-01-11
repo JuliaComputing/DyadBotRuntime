@@ -24,12 +24,12 @@ const STBY_PIN = 26
 const PWM_FREQ_HZ = 1000  # 1kHz PWM frequency
 const PWM_MAX_VALUE = 1024  # PWM duty cycle range (0-1024)
 
-# Global handles for GPIO lines and PWM channels
+# Global handles for GPIO pins and PWM channels
 mutable struct HardwareContext
-    gpio_chip::GPIO.GPIOChip
-    ain1_line::GPIO.GPIOLine
-    bin1_line::GPIO.GPIOLine
-    stby_line::GPIO.GPIOLine
+    gpio::GPIO.GPIOController
+    ain1::GPIO.GPIOPin
+    bin1::GPIO.GPIOPin
+    stby::GPIO.GPIOPin
     pwm_chip::PWM.PWMChip
     pwm_left::PWM.PWMChannel
     pwm_right::PWM.PWMChannel
@@ -54,9 +54,9 @@ end
 Stop both motors by setting PWM to 0 and appropriate direction pins.
 """
 function car_stop!(hw::HardwareContext)
-    GPIO.set_value(hw.ain1_line, 1)  # HIGH
-    GPIO.set_value(hw.bin1_line, 0)  # LOW
-    GPIO.set_value(hw.stby_line, 1)  # HIGH (standby off = enabled, but PWM=0)
+    GPIO.set_value(hw.ain1, 1)  # HIGH
+    GPIO.set_value(hw.bin1, 0)  # LOW
+    GPIO.set_value(hw.stby, 1)  # HIGH (standby off = enabled, but PWM=0)
     PWM.pwmWrite(hw.pwm_left, 0, PWM_MAX_VALUE)
     PWM.pwmWrite(hw.pwm_right, 0, PWM_MAX_VALUE)
 end
@@ -70,19 +70,19 @@ Handles direction pin setting based on PWM sign.
 function apply_motor_output!(hw::HardwareContext, pwm_left::Float32, pwm_right::Float32)
     # Left motor
     if pwm_left < 0
-        GPIO.set_value(hw.ain1_line, 1)
+        GPIO.set_value(hw.ain1, 1)
         PWM.pwmWrite(hw.pwm_left, round(Int, -pwm_left), PWM_MAX_VALUE)
     else
-        GPIO.set_value(hw.ain1_line, 0)
+        GPIO.set_value(hw.ain1, 0)
         PWM.pwmWrite(hw.pwm_left, round(Int, pwm_left), PWM_MAX_VALUE)
     end
 
     # Right motor
     if pwm_right < 0
-        GPIO.set_value(hw.bin1_line, 1)
+        GPIO.set_value(hw.bin1, 1)
         PWM.pwmWrite(hw.pwm_right, round(Int, -pwm_right), PWM_MAX_VALUE)
     else
-        GPIO.set_value(hw.bin1_line, 0)
+        GPIO.set_value(hw.bin1, 0)
         PWM.pwmWrite(hw.pwm_right, round(Int, pwm_right), PWM_MAX_VALUE)
     end
 end
@@ -90,24 +90,21 @@ end
 function (@main)(args)::Cint
     println(Core.stdout, "hello world!")
 
-    # Initialize GPIO chip
-    gpio_chip = GPIO.open_chip("/dev/gpiochip0")
-    println(Core.stdout, "gpio chip opened")
+    # Initialize GPIO controller
+    gpio = GPIO.open_gpio("/dev/gpiochip0")
+    println(Core.stdout, "gpio opened")
 
-    # Setup GPIO output lines for motor direction
-    ain1_line = GPIO.get_line(gpio_chip, AIN1)
-    GPIO.request_output(ain1_line, "motor_ain1", 0)
-    println(Core.stdout, "ain1 opened")
+    # Setup GPIO output pins for motor direction
+    ain1 = GPIO.request_output(gpio, AIN1, "motor_ain1", 0)
+    println(Core.stdout, "ain1 configured")
 
-    bin1_line = GPIO.get_line(gpio_chip, BIN1)
-    GPIO.request_output(bin1_line, "motor_bin1", 0)
-    println(Core.stdout, "bin1 opened")
+    bin1 = GPIO.request_output(gpio, BIN1, "motor_bin1", 0)
+    println(Core.stdout, "bin1 configured")
 
-    stby_line = GPIO.get_line(gpio_chip, STBY_PIN)
-    GPIO.request_output(stby_line, "motor_stby", 0)
-    println(Core.stdout, "stby opened")
+    stby = GPIO.request_output(gpio, STBY_PIN, "motor_stby", 0)
+    println(Core.stdout, "stby configured")
 
-    println(Core.stdout, "gpio lines configured")
+    println(Core.stdout, "gpio pins configured")
 
     # Setup hardware PWM via sysfs
     pwm_chip = PWM.open_chip(0)
@@ -125,8 +122,7 @@ function (@main)(args)::Cint
     println(Core.stdout, "pwm startup done")
 
     # Create hardware context
-    hw = HardwareContext(gpio_chip, ain1_line, bin1_line, stby_line,
-                         pwm_chip, pwm_left, pwm_right)
+    hw = HardwareContext(gpio, ain1, bin1, stby, pwm_chip, pwm_left, pwm_right)
 
     # Initialize I2C for IMU (bus 1, address 0x68)
     imu = MPU6000(1, 0x68)
@@ -136,8 +132,8 @@ function (@main)(args)::Cint
     println(Core.stdout, "imu startup done")
 
     timu = ThreadedMPU6000(imu)
-    tenc_1a = ThreadedEncoder(Encoder(gpio_chip, M1A), 1_000)
-    tenc_2a = ThreadedEncoder(Encoder(gpio_chip, M2A), 1_000)
+    tenc_1a = ThreadedEncoder(Encoder(gpio, M1A), 1_000)
+    tenc_2a = ThreadedEncoder(Encoder(gpio, M2A), 1_000)
 
     ctrl = BalanceController()
 
