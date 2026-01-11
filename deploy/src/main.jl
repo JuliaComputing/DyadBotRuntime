@@ -172,6 +172,7 @@ function (@main)(args)::Cint
             put!(timu.request, true) # trigger the IMU request
             wait_until(start + ml_update_rate_ns)
             imu_data = take!(timu.response)
+            println(Core.stdout, "IMU response: $(imu_data.accel_x)")
             enc_1_cnts = reset!(tenc_1a)
             enc_2_cnts = reset!(tenc_2a)
             command = BalanceController.balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
@@ -180,9 +181,11 @@ function (@main)(args)::Cint
             start = time_ns()
             if isnothing(command)
                 car_stop!(hw)
+                println(Core.stdout, "motors stopped!")
             else
                 left, right = command
                 apply_motor_output!(hw, left, right)
+                println(Core.stdout, "motors run!")
             end
         end
     catch e
