@@ -144,7 +144,7 @@ function (@main)(args)::Cint
     println(Core.stdout, "pwm startup done")
 
     # Create hardware context
-    hw = HardwareContext(gpio, ain1, bin1, stby, pwm_chip, pwm_left, pwm_right)
+    hw = HardwareContext(gpio, ain1, bin1, stby, ltrans_oe, pwm_chip, pwm_left, pwm_right)
 
     # Initialize I2C for IMU (bus 1, address 0x68)
     imu = MPU6000(1, 0x68)
@@ -159,31 +159,37 @@ function (@main)(args)::Cint
 
     GPIO.set_value(ltrans_oe, 1)
     GPIO.set_value(stby, 1) # take the motor controller out of standby
-    apply_motor_output!(hw, 512.0f0, 512.0f0)
-    while true end
-    ctrl = BalanceController()
+    ctrl = BalanceController.BalanceController()
 
     ml_update_rate_ns = 50000000
     imu_read_margin = 12600000
     println(Core.stdout, "start loop!")
     start = time_ns()
-    while true
-        wait_until(start + ml_update_rate_ns - imu_read_margin)
-        put!(timu.request, true) # trigger the IMU request
-        wait_until(start + ml_update_rate_ns)
-        imu_data = take!(timu.response)
-        enc_1_cnts = reset!(tenc_1a)
-        enc_2_cnts = reset!(tenc_2a)
-        command = balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
-                      imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
-                      imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
-        start = time_ns()
-        if isnothing(command)
-            car_stop!(hw)
-        else
-            left, right = command
-            apply_motor_output!(hw, left, right)
+    Base.exit_on_sigint(false)
+    try
+        while true
+            wait_until(start + ml_update_rate_ns - imu_read_margin)
+            put!(timu.request, true) # trigger the IMU request
+            wait_until(start + ml_update_rate_ns)
+            imu_data = take!(timu.response)
+            enc_1_cnts = reset!(tenc_1a)
+            enc_2_cnts = reset!(tenc_2a)
+            command = balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
+                        imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
+                        imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
+            start = time_ns()
+            if isnothing(command)
+                car_stop!(hw)
+            else
+                left, right = command
+                apply_motor_output!(hw, left, right)
+            end
         end
+    catch e
+        rethrow()
+    finally
+        GPIO.set_value(ltrans_oe, 0)
+        GPIO.set_value(stby, 0)
     end
     return 0
 end
