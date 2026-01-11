@@ -144,7 +144,7 @@ function (@main)(args)::Cint
     println(Core.stdout, "pwm startup done")
 
     # Create hardware context
-    hw = HardwareContext(gpio, ain1, bin1, stby, ltrans_oe, pwm_chip, pwm_left, pwm_right)
+    hw = HardwareContext(gpio, ain1, bin1, stby, pwm_chip, pwm_left, pwm_right)
 
     # Initialize I2C for IMU (bus 1, address 0x68)
     imu = MPU6000(1, 0x68)
@@ -157,47 +157,33 @@ function (@main)(args)::Cint
     tenc_1a = ThreadedEncoder(Encoder(gpio, M1A))
     tenc_2a = ThreadedEncoder(Encoder(gpio, M2A))
 
-    # Disable default SIGINT handling so we can catch Ctrl-C
-    ccall(:jl_exit_on_sigint, Cvoid, (Cint,), 0)
+    GPIO.set_value(ltrans_oe, 1)
+    GPIO.set_value(stby, 1) # take the motor controller out of standby
+    apply_motor_output!(hw, 512.0f0, 512.0f0)
+    while true end
+    ctrl = BalanceController()
 
-    try
-        GPIO.set_value(hw.ltrans_oe, 1)
-        GPIO.set_value(hw.stby, 1) # take the motor controller out of standby
-        apply_motor_output!(hw, 512.0f0, 512.0f0)
-        while true end
-        ctrl = BalanceController()
-
-        ml_update_rate_ns = 50000000
-        imu_read_margin = 12600000
-        println(Core.stdout, "start loop!")
+    ml_update_rate_ns = 50000000
+    imu_read_margin = 12600000
+    println(Core.stdout, "start loop!")
+    start = time_ns()
+    while true
+        wait_until(start + ml_update_rate_ns - imu_read_margin)
+        put!(timu.request, true) # trigger the IMU request
+        wait_until(start + ml_update_rate_ns)
+        imu_data = take!(timu.response)
+        enc_1_cnts = reset!(tenc_1a)
+        enc_2_cnts = reset!(tenc_2a)
+        command = balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
+                      imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
+                      imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
         start = time_ns()
-        while true
-            wait_until(start + ml_update_rate_ns - imu_read_margin)
-            put!(timu.request, true) # trigger the IMU request
-            wait_until(start + ml_update_rate_ns)
-            imu_data = take!(timu.response)
-            enc_1_cnts = reset!(tenc_1a)
-            enc_2_cnts = reset!(tenc_2a)
-            command = balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
-                          imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
-                          imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
-            start = time_ns()
-            if isnothing(command)
-                car_stop!(hw)
-            else
-                left, right = command
-                apply_motor_output!(hw, left, right)
-            end
-        end
-    catch e
-        if e isa InterruptException
-            println(Core.stdout, "\nCtrl-C received, stopping...")
+        if isnothing(command)
+            car_stop!(hw)
         else
-            println(Core.stdout, "Error: ", e)
-            rethrow(e)
+            left, right = command
+            apply_motor_output!(hw, left, right)
         end
-    finally
-        shutdown!(hw)
     end
     return 0
 end
