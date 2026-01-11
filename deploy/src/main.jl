@@ -169,8 +169,10 @@ function (@main)(args)::Cint
     try
         while true
             wait_until(start + ml_update_rate_ns - imu_read_margin)
+            println(Core.stdout, "wait 1")
             put!(timu.request, true) # trigger the IMU request
             wait_until(start + ml_update_rate_ns)
+            println(Core.stdout, "wait 2")
             imu_data = take!(timu.response)
             println(Core.stdout, "IMU response: $(imu_data.accel_x)")
             enc_1_cnts = reset!(tenc_1a)
