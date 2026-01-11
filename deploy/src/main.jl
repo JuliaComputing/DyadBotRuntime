@@ -139,6 +139,7 @@ function (@main)(args)::Cint
     tenc_2a = ThreadedEncoder(Encoder(gpio, M2A))
 
     GPIO.set_value(ltrans_oe, 1)
+    GPIO.set_value(stby, 1) # take the motor controller out of standby
     apply_motor_output!(hw, 512.0f0, 512.0f0)
     while true end
     ctrl = BalanceController()
