@@ -174,7 +174,7 @@ function (@main)(args)::Cint
             imu_data = take!(timu.response)
             enc_1_cnts = reset!(tenc_1a)
             enc_2_cnts = reset!(tenc_2a)
-            command = balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
+            command = BalanceController.balance_car!(ctrl, enc_1_cnts, enc_2_cnts,
                         imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
                         imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z)
             start = time_ns()
