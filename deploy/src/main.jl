@@ -135,9 +135,9 @@ function (@main)(args)::Cint
     tenc_1a = ThreadedEncoder(Encoder(gpio, M1A))
     tenc_2a = ThreadedEncoder(Encoder(gpio, M2A))
 
-    ctrl = BalanceController()
     apply_motor_output!(hw, 512.0f0, 512.0f0)
     while true end
+    ctrl = BalanceController()
 
     ml_update_rate_ns = 50000000
     imu_read_margin = 12600000
