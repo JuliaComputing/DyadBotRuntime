@@ -175,11 +175,11 @@ function MPU6000(device::I2C.I2CDevice)
 end
 
 """
-    MPU6000(bus::Int, address::Int=0x68)
+    MPU6000(bus::Int, address::Integer=0x68)
 
 Create an MPU6000 instance by opening an I2C connection.
 """
-function MPU6000(bus::Int, address::Int=0x68)
+function MPU6000(bus::Int, address::Integer=0x68)
     device = I2C.open_device(bus, address)
     return MPU6000(device, GYRO_FS_250, ACCEL_FS_2G, zeros(UInt8, 14))
 end
