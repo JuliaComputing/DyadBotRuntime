@@ -104,6 +104,9 @@ function (@main)(args)::Cint
     stby = GPIO.request_output(gpio, STBY_PIN, "motor_stby", 0)
     println(Core.stdout, "stby configured")
 
+    ltrans_oe = GPIO.request_output(gpio, LTRANS_OE, "ltrans_oe", 0)
+    println(Core.stdout, "ltrans_oe configured")
+
     println(Core.stdout, "gpio pins configured")
 
     # Setup hardware PWM via sysfs
@@ -135,6 +138,7 @@ function (@main)(args)::Cint
     tenc_1a = ThreadedEncoder(Encoder(gpio, M1A))
     tenc_2a = ThreadedEncoder(Encoder(gpio, M2A))
 
+    GPIO.set_value(ltrans_oe, 1)
     apply_motor_output!(hw, 512.0f0, 512.0f0)
     while true end
     ctrl = BalanceController()
