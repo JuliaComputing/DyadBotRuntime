@@ -10,8 +10,8 @@ function shift_register_program(; ser_pin::Integer, clk_pin::Integer, rclk_pin::
         Label(:bitloop),
         Out(Pins(), 1; sideset=0),
         Jmp{:x_dec}(:bitloop; sideset=1),
-        Set(Pins(), 1; sideset=0),
-        Set(Pins(), 0; sideset=0),
+        PIOLib.Set(Pins(), 1; sideset=0),
+        PIOLib.Set(Pins(), 0; sideset=0),
         Wrap(),
     ]; sideset_bits=1)
 
@@ -29,7 +29,7 @@ function shift_register_program(; ser_pin::Integer, clk_pin::Integer, rclk_pin::
 end
 
 function setup_shift_register!(sm::StateMachine, nbits::Integer)
-    exec!(sm, Set(RegY(), nbits - 1))
+    exec!(sm, PIOLib.Set(RegY(), nbits - 1))
 end
 
 shift_out!(sm::StateMachine, data::UInt32) = put!(sm, data)

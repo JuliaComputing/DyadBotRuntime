@@ -426,11 +426,11 @@ end
 Read raw accelerometer values (X, Y, Z) as signed 16-bit integers.
 """
 function read_accel_raw(imu::ICM42688)
-    buf = @view imu.rx_buf[1:6]
-    read_regs!(imu, ICM42688Registers.ACCEL_DATA_X1, buf)
-    ax = parse_int16_be(buf[1], buf[2])
-    ay = parse_int16_be(buf[3], buf[4])
-    az = parse_int16_be(buf[5], buf[6])
+    read_regs!(imu, ICM42688Registers.ACCEL_DATA_X1, 6)
+    buf = imu.rx_buf
+    ax = parse_int16_be(buf[2], buf[3])
+    ay = parse_int16_be(buf[4], buf[5])
+    az = parse_int16_be(buf[6], buf[7])
     return (ax, ay, az)
 end
 
