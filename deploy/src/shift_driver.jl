@@ -1,5 +1,39 @@
 using PIOLib
 
+function shift_register_program(; ser_pin::Integer, clk_pin::Integer, rclk_pin::Integer,
+                                  nbits::Integer, clkdiv::Real=1.0f0)
+    1 <= nbits <= 31 || error("nbits must be 1-31 (SET immediate is 5 bits, and 32 encodes as 0 in autopull threshold)")
+
+    prog = build_program([
+        WrapTarget(),
+        Mov{:none}(RegX(), RegY(); sideset=0),
+        Label(:bitloop),
+        Out(Pins(), 1; sideset=0),
+        Jmp{:x_dec}(:bitloop; sideset=1),
+        Set(Pins(), 1; sideset=0),
+        Set(Pins(), 0; sideset=0),
+        Wrap(),
+    ]; sideset_bits=1)
+
+    config = SMConfig(;
+        out_pins=(ser_pin, 1),
+        set_pins=(rclk_pin, 1),
+        sideset_pin_base=clk_pin,
+        sideset=(1, false, false),
+        out_shift=(true, true, nbits),
+        clkdiv=Float32(clkdiv),
+        wrap=(prog.wrap_target, prog.wrap),
+    )
+
+    prog, config
+end
+
+function setup_shift_register!(sm::StateMachine, nbits::Integer)
+    exec!(sm, Set(RegY(), nbits - 1))
+end
+
+shift_out!(sm::StateMachine, data::UInt32) = put!(sm, data)
+
 # --- Pin assignments ---
 const SER_PIN  = 26  # Serial data  (SER/DS)
 const CLK_PIN  = 19  # Shift clock  (SRCLK/SHCP)

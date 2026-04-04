@@ -333,12 +333,14 @@ Read into `dest` from the SPI device (half-duplex RX, TX sends zeros).
 """
 function Base.read!(dev::SPIDevice, dest::AbstractVector{UInt8})
     len = length(dest)
+    len > SPI_BUFFER_SIZE && error("read!: length $len exceeds buffer size $SPI_BUFFER_SIZE")
+
     fill!(@view(dev.scratch[1:len]), 0x00)
 
     xfer = SPIIocTransfer(UInt64(pointer(dev.scratch)), UInt64(pointer(dest)), UInt32(len), ZERO_XFER_TAIL...)
     unsafe_store!(Ptr{SPIIocTransfer}(pointer(dev.xfer_buf)), xfer)
 
-    do_xfer(dev, 1)
+    do_xfer(dev, 1, "read")
     return dest
 end
 
@@ -351,6 +353,8 @@ Useful for register reads: send command/address bytes in `tx`, receive response 
 function write_then_read!(dev::SPIDevice, tx::AbstractVector{UInt8}, rx::AbstractVector{UInt8})
     tx_len = length(tx)
     rx_len = length(rx)
+    rx_len > SPI_BUFFER_SIZE && error("write_then_read!: rx length $rx_len exceeds buffer size $SPI_BUFFER_SIZE")
+
     xfer_ptr = Ptr{SPIIocTransfer}(pointer(dev.xfer_buf))
 
     # First transfer: write, keep CS asserted
@@ -362,7 +366,7 @@ function write_then_read!(dev::SPIDevice, tx::AbstractVector{UInt8}, rx::Abstrac
     unsafe_store!(xfer_ptr,
         SPIIocTransfer(UInt64(pointer(dev.scratch)), UInt64(pointer(rx)), UInt32(rx_len), ZERO_XFER_TAIL...), 2)
 
-    return do_xfer(dev, 2)
+    return do_xfer(dev, 2, "write_then_read")
 end
 
 end # module SPI

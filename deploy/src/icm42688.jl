@@ -257,20 +257,18 @@ function read_reg(imu::ICM42688, reg::Integer)
 end
 
 """
-    read_regs!(imu::ICM42688, reg::UInt8, dest::AbstractVector{UInt8}) -> Nothing
+    read_regs!(imu::ICM42688, reg::Integer, count::Int) -> Nothing
 
-Burst read multiple bytes starting from a register into dest.
+Burst read `count` bytes starting from a register.
+Data lands in `imu.rx_buf[2:count+1]` (index 1 is the discarded address echo).
 """
-function read_regs!(imu::ICM42688, reg::Integer, dest::AbstractVector{UInt8})
-    count = length(dest)
+function read_regs!(imu::ICM42688, reg::Integer, count::Int)
     n = count + 1  # 1 address byte + N data bytes
 
     imu.tx_buf[1] = UInt8(reg) | SPI_READ_FLAG
     fill!(@view(imu.tx_buf[2:n]), 0x00)
 
     SPI.transfer!(imu.device, @view(imu.tx_buf[1:n]), @view(imu.rx_buf[1:n]))
-
-    copyto!(dest, 1, imu.rx_buf, 2, count)
     return nothing
 end
 
