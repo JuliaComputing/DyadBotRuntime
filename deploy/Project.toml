@@ -1,4 +1,6 @@
 [deps]
+PIOLib = "a21b0171-75fd-41b6-8640-f97fa3fa9a76"
+PIOLib_jll = "71578703-7aff-5c16-bbae-7ba9c160b2b9"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Timers = "21f18d07-b854-4dab-86f0-c15a3821819a"
