@@ -4,6 +4,8 @@ include(joinpath(@__DIR__, "gpio.jl"))
 include(joinpath(@__DIR__, "pwm.jl"))
 include(joinpath(@__DIR__, "mpu6000.jl"))
 include(joinpath(@__DIR__, "encoder.jl"))
+include(joinpath(@__DIR__, "shift_driver.jl"))
+include(joinpath(@__DIR__, "seven_seg.jl"))
 
 using .GPIO
 using .PWM
@@ -27,16 +29,19 @@ const PWM_MAX_VALUE = 1024  # PWM duty cycle range (0-1024)
 # Global handles for GPIO pins and PWM channels
 mutable struct HardwareContext
     gpio::GPIO.GPIOController
+    chain::ShiftRegisterChain
 end
 
 """
     shutdown!(hw::HardwareContext)
 
-Safely shutdown hardware: disable motors and level translator.
+Safely shutdown hardware: clear shift register outputs, disable motors and level translator.
 Called on Ctrl-C or program exit.
 """
 function shutdown!(hw::HardwareContext)
     println(Core.stdout, "Shutting down hardware...")
+    hw.chain[0:23] = false
+    close(hw.chain)
     println(Core.stdout, "Hardware shutdown complete.")
 end
 
@@ -57,13 +62,19 @@ function (@main)(args)::Cint
 
     # Initialize GPIO controller
     gpio = GPIO.open_gpio("/dev/gpiochip0")
-    hw = HardwareContext(gpio)
 
     # Setup GPIO output pins for motor direction
     cm_present = GPIO.request_output(gpio, CM_PRESENT, "cm_present", 0)
     d1 = GPIO.request_output(gpio, D1, "d1", 0)
     d2 = GPIO.request_output(gpio, D2, "d2", 0)
     println(Core.stdout, "GPIO configured")
+
+    # Initialize 3 chained shift registers via PIO
+    chain = open_shift_registers()
+    chain[0:23] = false
+    println(Core.stdout, "Shift registers initialized ($NUM_REGISTERS x 8-bit, $NBITS outputs)")
+
+    hw = HardwareContext(gpio, chain)
 
     # Enable hardware
     GPIO.set_value(cm_present, 1)
@@ -72,7 +83,13 @@ function (@main)(args)::Cint
     d1v = 1
     d2v = 0
 
-    # Control loop timing (5ms = 200Hz)
+    # 7-segment displays on 2nd and 3rd shift registers
+    disp1 = SevenSeg(chain, 8)   # 2nd register: bits 8–15
+    disp2 = SevenSeg(chain, 16)  # 3rd register: bits 16–23
+
+    digit = 0
+
+    # Control loop timing (500ms = 2Hz)
     loop_period_ns = 500_000_000
 
     println(Core.stdout, "Starting control loop...")
@@ -85,10 +102,18 @@ function (@main)(args)::Cint
             wait_until(loop_start + loop_period_ns)
             loop_start = time_ns()
 
+            # Blink GPIOs
             d1v = 1-d1v
             d2v = 1-d2v
             GPIO.set_value(d1, d1v)
             GPIO.set_value(d2, d2v)
+
+            # Display 1 shows current digit, display 2 shows previous
+            transaction(chain) do
+                show_digit!(disp2, digit)
+                show_digit!(disp1, (digit + 1) % 10)
+            end
+            digit = (digit + 1) % 10
         end
     catch e
         if e isa InterruptException
