@@ -1,6 +1,6 @@
 using PIOLib
 
-function shift_register_program(; ser_pin::Integer, clk_pin::Integer, rclk_pin::Integer,
+function shift_register_program(pio::PIOBlock; ser_pin::Integer, clk_pin::Integer, rclk_pin::Integer,
                                   nbits::Integer, clkdiv::Real=1.0f0)
     1 <= nbits <= 31 || error("nbits must be 1-31 (SET immediate is 5 bits, and 32 encodes as 0 in autopull threshold)")
 
@@ -15,7 +15,7 @@ function shift_register_program(; ser_pin::Integer, clk_pin::Integer, rclk_pin::
         Wrap(),
     ]; sideset_bits=1)
 
-    config = SMConfig(;
+    config = SMConfig(pio;
         out_pins=(ser_pin, 1),
         set_pins=(rclk_pin, 1),
         sideset_pin_base=clk_pin,
@@ -87,13 +87,13 @@ Initialize the PIO and state machine for driving the shift register chain.
 Caller is responsible for calling `close` when done.
 """
 function open_shift_registers(pio_idx::Integer=0)
-    prog, config = shift_register_program(
-        ser_pin=SER_PIN, clk_pin=CLK_PIN, rclk_pin=RCLK_PIN,
-        nbits=NBITS, clkdiv=CLKDIV,
-    )
-
     pio = open_pio(pio_idx)
     try
+        prog, config = shift_register_program(pio;
+            ser_pin=SER_PIN, clk_pin=CLK_PIN, rclk_pin=RCLK_PIN,
+            nbits=NBITS, clkdiv=CLKDIV,
+        )
+
         for pin in (SER_PIN, CLK_PIN, RCLK_PIN)
             pio_pin_init!(pio, pin)
         end

@@ -451,11 +451,11 @@ end
 Read raw gyroscope values (X, Y, Z) as signed 16-bit integers.
 """
 function read_gyro_raw(imu::ICM42688)
-    buf = @view imu.rx_buf[1:6]
-    read_regs!(imu, ICM42688Registers.GYRO_DATA_X1, buf)
-    gx = parse_int16_be(buf[1], buf[2])
-    gy = parse_int16_be(buf[3], buf[4])
-    gz = parse_int16_be(buf[5], buf[6])
+    read_regs!(imu, ICM42688Registers.GYRO_DATA_X1, 6)
+    buf = imu.rx_buf
+    gx = parse_int16_be(buf[2], buf[3])
+    gy = parse_int16_be(buf[4], buf[5])
+    gz = parse_int16_be(buf[6], buf[7])
     return (gx, gy, gz)
 end
 
@@ -476,9 +476,8 @@ end
 Read raw temperature value as a signed 16-bit integer.
 """
 function read_temp_raw(imu::ICM42688)
-    buf = @view imu.rx_buf[1:2]
-    read_regs!(imu, ICM42688Registers.TEMP_DATA1, buf)
-    return parse_int16_be(buf[1], buf[2])
+    read_regs!(imu, ICM42688Registers.TEMP_DATA1, 2)
+    return parse_int16_be(imu.rx_buf[2], imu.rx_buf[3])
 end
 
 """
@@ -500,17 +499,17 @@ Reads 14 consecutive bytes starting from TEMP_DATA1 (0x1D).
 Layout: TEMP(2) + ACCEL(6) + GYRO(6) = 14 bytes.
 """
 function read_all_raw(imu::ICM42688)
-    buf = @view imu.rx_buf[1:14]
-    read_regs!(imu, ICM42688Registers.TEMP_DATA1, buf)
+    read_regs!(imu, ICM42688Registers.TEMP_DATA1, 14)
+    buf = imu.rx_buf  # data at indices 2..15
 
     return ICM42688Data(
-        parse_int16_be(buf[3],  buf[4]),   # ACCEL_X
-        parse_int16_be(buf[5],  buf[6]),   # ACCEL_Y
-        parse_int16_be(buf[7],  buf[8]),   # ACCEL_Z
-        parse_int16_be(buf[1],  buf[2]),   # TEMP
-        parse_int16_be(buf[9],  buf[10]),  # GYRO_X
-        parse_int16_be(buf[11], buf[12]),  # GYRO_Y
-        parse_int16_be(buf[13], buf[14])   # GYRO_Z
+        parse_int16_be(buf[4],  buf[5]),   # ACCEL_X
+        parse_int16_be(buf[6],  buf[7]),   # ACCEL_Y
+        parse_int16_be(buf[8],  buf[9]),   # ACCEL_Z
+        parse_int16_be(buf[2],  buf[3]),   # TEMP
+        parse_int16_be(buf[10], buf[11]),  # GYRO_X
+        parse_int16_be(buf[12], buf[13]),  # GYRO_Y
+        parse_int16_be(buf[14], buf[15])   # GYRO_Z
     )
 end
 
@@ -614,9 +613,8 @@ end
 Read the number of bytes currently in the FIFO.
 """
 function read_fifo_count(imu::ICM42688)
-    buf = @view imu.rx_buf[1:2]
-    read_regs!(imu, ICM42688Registers.FIFO_COUNTH, buf)
-    return (UInt16(buf[1]) << 8) | UInt16(buf[2])
+    read_regs!(imu, ICM42688Registers.FIFO_COUNTH, 2)
+    return (UInt16(imu.rx_buf[2]) << 8) | UInt16(imu.rx_buf[3])
 end
 
 """
