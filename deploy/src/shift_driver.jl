@@ -104,7 +104,7 @@ function open_shift_registers(pio_idx::Integer=0)
         try
             pin_mask = UInt32(1) << SER_PIN | UInt32(1) << CLK_PIN | UInt32(1) << RCLK_PIN
             set_pindirs!(sm, pin_mask, pin_mask)
-            init!(sm, 0, config)
+            PIOLib.init!(sm, 0, config)
             setup_shift_register!(sm, NBITS)
             enable!(sm)
         catch
