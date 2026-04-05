@@ -98,13 +98,13 @@ function open_shift_registers(pio_idx::Integer=0)
             pio_pin_init!(pio, pin)
         end
 
-        load_program!(pio, prog, config)
+        offset = load_program!(pio, prog, config)
 
         sm = claim_sm(pio)
         try
             pin_mask = UInt32(1) << SER_PIN | UInt32(1) << CLK_PIN | UInt32(1) << RCLK_PIN
             set_pindirs!(sm, pin_mask, pin_mask)
-            PIOLib.init!(sm, 0, config)
+            PIOLib.init!(sm, offset, config)
             setup_shift_register!(sm, NBITS)
             enable!(sm)
         catch
