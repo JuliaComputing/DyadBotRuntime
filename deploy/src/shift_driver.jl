@@ -124,23 +124,12 @@ end
 
 # --- Flush ---
 
-function _reverse_byte(b::UInt8)
-    b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4)
-    b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2)
-    b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1)
-    b
-end
-
 function flush!(chain::ShiftRegisterChain)
-    # OSR shifts left (MSB first). Bytes go out in the right order,
-    # but bits within each byte land reversed on Q0-Q7.
-    # Reverse bits within each byte so shadow bit 0 → Q0.
-    v = chain.state & 0x00FFFFFF
-    b0 = _reverse_byte(UInt8( v        & 0xFF))
-    b1 = _reverse_byte(UInt8((v >>  8) & 0xFF))
-    b2 = _reverse_byte(UInt8((v >> 16) & 0xFF))
-    swapped = (UInt32(b2) << 16) | (UInt32(b1) << 8) | UInt32(b0)
-    shift_out!(chain.sm, swapped << (32 - NBITS))
+    # OSR shifts left (MSB first). 74HC595 clocks SER → Q0 → Q7,
+    # so first bit in ends up at Q7, last bit at Q0.
+    # MSB-first means bit 7 goes first → Q7, bit 0 last → Q0.
+    # No bit reversal needed — natural alignment.
+    shift_out!(chain.sm, (chain.state & 0x00FFFFFF) << (32 - NBITS))
 end
 
 # --- Bulk writes (update shadow + flush) ---
