@@ -1,5 +1,8 @@
 using PIOLib
 
+const SHIFT_RIGHT = true   # LSB first
+const SHIFT_LEFT  = false  # MSB first
+
 function shift_register_program(pio::PIOBlock; ser_pin::Integer, clk_pin::Integer, rclk_pin::Integer,
                                   nbits::Integer, clkdiv::Real=1.0f0)
     1 <= nbits <= 31 || error("nbits must be 1-31 (SET immediate is 5 bits, and 32 encodes as 0 in autopull threshold)")
@@ -20,7 +23,7 @@ function shift_register_program(pio::PIOBlock; ser_pin::Integer, clk_pin::Intege
         set_pins=(rclk_pin, 1),
         sideset_pin_base=clk_pin,
         sideset=(1, false, false),
-        out_shift=(true, true, nbits),
+        out_shift=(SHIFT_LEFT, true, nbits),
         clkdiv=Float32(clkdiv),
         wrap=(prog.wrap_target, prog.wrap),
     )
@@ -122,7 +125,8 @@ end
 # --- Flush ---
 
 function flush!(chain::ShiftRegisterChain)
-    shift_out!(chain.sm, chain.state & 0x00FFFFFF)
+    # Left-align: OSR shifts left, so MSB goes out first
+    shift_out!(chain.sm, (chain.state & 0x00FFFFFF) << (32 - NBITS))
 end
 
 # --- Bulk writes (update shadow + flush) ---

@@ -30,6 +30,7 @@ const PWM_MAX_VALUE = 1024  # PWM duty cycle range (0-1024)
 mutable struct HardwareContext
     gpio::GPIO.GPIOController
     chain::ShiftRegisterChain
+    pins::Vector{GPIO.GPIOPin}
 end
 
 """
@@ -42,6 +43,10 @@ function shutdown!(hw::HardwareContext)
     println(Core.stdout, "Shutting down hardware...")
     hw.chain[0:23] = false
     close(hw.chain)
+    for pin in hw.pins
+        close(pin)
+    end
+    close(hw.gpio)
     println(Core.stdout, "Hardware shutdown complete.")
 end
 
@@ -74,7 +79,7 @@ function (@main)(args)::Cint
     chain[0:23] = false
     println(Core.stdout, "Shift registers initialized ($NUM_REGISTERS x 8-bit, $NBITS outputs)")
 
-    hw = HardwareContext(gpio, chain)
+    hw = HardwareContext(gpio, chain, [cm_present, d1, d2])
 
     # Enable hardware
     GPIO.set_value(cm_present, 1)
