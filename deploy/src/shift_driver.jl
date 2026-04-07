@@ -124,9 +124,19 @@ end
 
 # --- Flush ---
 
+function _bitreverse(x::UInt32, nbits::Integer)
+    r = UInt32(0)
+    for i in 0:nbits-1
+        r |= ((x >> i) & UInt32(1)) << (nbits - 1 - i)
+    end
+    r
+end
+
 function flush!(chain::ShiftRegisterChain)
-    # Left-align: OSR shifts left, so MSB goes out first
-    shift_out!(chain.sm, (chain.state & 0x00FFFFFF) << (32 - NBITS))
+    # OSR shifts left (MSB first). Bit-reverse so shadow bit 0 → Q0,
+    # then left-align into the top of the 32-bit word.
+    reversed = _bitreverse(chain.state & 0x00FFFFFF, NBITS)
+    shift_out!(chain.sm, reversed << (32 - NBITS))
 end
 
 # --- Bulk writes (update shadow + flush) ---
