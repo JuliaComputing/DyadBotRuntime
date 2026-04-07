@@ -6,6 +6,7 @@ include(joinpath(@__DIR__, "mpu6000.jl"))
 include(joinpath(@__DIR__, "encoder.jl"))
 include(joinpath(@__DIR__, "shift_driver.jl"))
 include(joinpath(@__DIR__, "seven_seg.jl"))
+include(joinpath(@__DIR__, "ws2812_driver.jl"))
 
 using .GPIO
 using .PWM
@@ -29,7 +30,9 @@ const PWM_MAX_VALUE = 1024  # PWM duty cycle range (0-1024)
 # Global handles for GPIO pins and PWM channels
 mutable struct HardwareContext
     gpio::GPIO.GPIOController
+    pio::PIOBlock
     chain::ShiftRegisterChain
+    nose::WS2812
     pins::Vector{GPIO.GPIOPin}
 end
 
@@ -42,7 +45,10 @@ Called on Ctrl-C or program exit.
 function shutdown!(hw::HardwareContext)
     println(Core.stdout, "Shutting down hardware...")
     hw.chain[0:23] = false
+    set_color!(hw.nose, 0, 0, 0)
     close(hw.chain)
+    close(hw.nose)
+    close(hw.pio)
     for pin in hw.pins
         close(pin)
     end
@@ -61,6 +67,7 @@ end
 const CM_PRESENT=23
 const D1=5
 const D2=24
+const NOSE_RGB=18
 
 function (@main)(args)::Cint
     println(Core.stdout, "Balance car starting...")
@@ -74,12 +81,20 @@ function (@main)(args)::Cint
     d2 = GPIO.request_output(gpio, D2, "d2", 0)
     println(Core.stdout, "GPIO configured")
 
+    # Open shared PIO block
+    pio = open_pio(0)
+
     # Initialize 3 chained shift registers via PIO
-    chain = open_shift_registers()
+    chain = open_shift_registers(pio)
     chain[0:23] = false
     println(Core.stdout, "Shift registers initialized ($NUM_REGISTERS x 8-bit, $NBITS outputs)")
 
-    hw = HardwareContext(gpio, chain, [cm_present, d1, d2])
+    # Initialize nose RGB LED (WS2812) on same PIO block
+    nose = open_ws2812(pio, NOSE_RGB)
+    set_color!(nose, 0, 0, 0)
+    println(Core.stdout, "Nose RGB LED initialized on pin $NOSE_RGB")
+
+    hw = HardwareContext(gpio, pio, chain, nose, [cm_present, d1, d2])
 
     # Enable hardware
     GPIO.set_value(cm_present, 1)
@@ -93,6 +108,7 @@ function (@main)(args)::Cint
     disp2 = SevenSeg(chain, 16)  # 3rd register: bits 16–23
 
     digit = 0
+    hue = 0
 
     # Control loop timing (500ms = 2Hz)
     loop_period_ns = 500_000_000
@@ -119,6 +135,26 @@ function (@main)(args)::Cint
                 show_digit!(disp1, (digit + 1) % 10)
             end
             digit = (digit + 1) % 10
+
+            # Cycle nose LED through hue wheel
+            # Simple HSV→RGB with S=V=255, varying H
+            h = hue ÷ 43
+            f = (hue - h * 43) * 6
+            q = 255 - f
+            if h == 0
+                set_color!(nose, 255, f, 0)
+            elseif h == 1
+                set_color!(nose, q, 255, 0)
+            elseif h == 2
+                set_color!(nose, 0, 255, f)
+            elseif h == 3
+                set_color!(nose, 0, q, 255)
+            elseif h == 4
+                set_color!(nose, f, 0, 255)
+            else
+                set_color!(nose, 255, 0, q)
+            end
+            hue = (hue + 25) % 256
         end
     catch e
         if e isa InterruptException

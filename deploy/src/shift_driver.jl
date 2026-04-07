@@ -84,42 +84,36 @@ mutable struct ShiftRegisterChain
 end
 
 """
-    open_shift_registers(pio_idx=0) -> ShiftRegisterChain
+    open_shift_registers(pio::PIOBlock) -> ShiftRegisterChain
 
-Initialize the PIO and state machine for driving the shift register chain.
-Caller is responsible for calling `close` when done.
+Initialize a state machine on `pio` for driving the shift register chain.
+The PIO block must already be open (caller manages its lifetime).
 """
-function open_shift_registers(pio_idx::Integer=0)
-    pio = open_pio(pio_idx)
+function open_shift_registers(pio::PIOBlock)
+    prog, config = shift_register_program(pio;
+        ser_pin=SER_PIN, clk_pin=CLK_PIN, rclk_pin=RCLK_PIN,
+        nbits=NBITS, clkdiv=CLKDIV,
+    )
+
+    for pin in (SER_PIN, CLK_PIN, RCLK_PIN)
+        pio_pin_init!(pio, pin)
+    end
+
+    offset = load_program!(pio, prog, config)
+
+    sm = claim_sm(pio)
     try
-        prog, config = shift_register_program(pio;
-            ser_pin=SER_PIN, clk_pin=CLK_PIN, rclk_pin=RCLK_PIN,
-            nbits=NBITS, clkdiv=CLKDIV,
-        )
-
-        for pin in (SER_PIN, CLK_PIN, RCLK_PIN)
-            pio_pin_init!(pio, pin)
-        end
-
-        offset = load_program!(pio, prog, config)
-
-        sm = claim_sm(pio)
-        try
-            pin_mask = UInt32(1) << SER_PIN | UInt32(1) << CLK_PIN | UInt32(1) << RCLK_PIN
-            set_pindirs!(sm, pin_mask, pin_mask)
-            PIOLib.init!(sm, offset, config)
-            setup_shift_register!(sm, NBITS)
-            enable!(sm)
-        catch
-            unclaim!(sm)
-            rethrow()
-        end
-
-        return ShiftRegisterChain(pio, sm, UInt32(0), false)
+        pin_mask = UInt32(1) << SER_PIN | UInt32(1) << CLK_PIN | UInt32(1) << RCLK_PIN
+        set_pindirs!(sm, pin_mask, pin_mask)
+        PIOLib.init!(sm, offset, config)
+        setup_shift_register!(sm, NBITS)
+        enable!(sm)
     catch
-        close(pio)
+        unclaim!(sm)
         rethrow()
     end
+
+    return ShiftRegisterChain(pio, sm, UInt32(0), false)
 end
 
 # --- Flush ---
@@ -265,5 +259,4 @@ end
 function Base.close(chain::ShiftRegisterChain)
     disable!(chain.sm)
     unclaim!(chain.sm)
-    close(chain.pio)
 end
