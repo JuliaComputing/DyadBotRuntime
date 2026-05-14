@@ -1013,6 +1013,89 @@ pmbus_version(dev::DACDevice) =
     UInt8((read_reg(dev, PMBUS_VERSION_ADDR) >> 8) & 0xFF)
 
 #=============================================================================
+  Bulk slave-address configuration (datasheet §8.5.2.1.1)
+=============================================================================#
+
+"""
+    set_dac_addresses(bus, pairs) -> Dict{UInt8, DACDevice}
+
+Walk through datasheet §8.5.2.1.1 to assign distinct I²C slave addresses to up
+to four DAC43701s sharing a bus, then snapshot each device's registers to NVM
+so the new address survives power cycles.
+
+Each entry of `pairs` is `desired_address => gpi_with`, where `desired_address`
+is a 7-bit I²C address in 0x48..0x4B and `gpi_with(callback)` drives that
+device's GPI line high, invokes the zero-arg `callback`, and then drives the
+GPI line back low — for example:
+
+    0x49 => function (cb)
+        set_high(line)
+        try; cb(); finally; set_low(line); end
+    end
+
+Returns a `Dict` mapping each assigned 7-bit address to a freshly-opened
+`DACDevice`. The bulk steps (arming GPI, writing SLAVE_ADDRESS, restoring GPI
+defaults) all go through the broadcast address 0x47, so the function assumes
+every device's GPI pin is held low at entry and that CONFIG2 sits at its reset
+value on every device — a broadcast CONFIG2 write rewrites the whole register,
+so non-default alarm-timing fields would be clobbered.
+"""
+function set_dac_addresses(bus::Integer, pairs)
+    for (addr, _) in pairs
+        (UInt8(addr) >> 2) == 0x12 || throw(ArgumentError(
+            "address 0x$(string(UInt8(addr), base=16, pad=2)) is not a valid " *
+            "DAC43701 slave address (must be 0x48..0x4B)"))
+    end
+
+    bcast = DACDevice(I2C.open_device(Int(bus), DAC43701_ADDR_BROADCAST))
+    result = Dict{UInt8, DACDevice}()
+    try
+        # Step 2: route GPI to the slave-address-program function on every
+        # device.
+        bcast.c2.GPI_CONFIG = UInt8(GPI_SLAVE_ADDR)
+        flush_config2(bcast)
+
+        # Step 3: arm GPI. Broadcast is write-only so we can't RMW TRIGGER;
+        # write a fully specified value with every action bit cleared.
+        write_reg(bcast, TRIGGER_ADDR,
+                  as_word(TRIGGER(SW_RESET_NOOP, 0, 0, 0, 0, 0, 0, 1, 0)))
+
+        # Steps 4-7: caller raises GPI on one device, we broadcast the new
+        # SLAVE_ADDRESS (only that device latches it), caller drops GPI again.
+        for (desired_addr, gpi_with) in pairs
+            gpi_with() do
+                bcast.c2.SLAVE_ADDRESS = UInt8(desired_addr) & 0x03
+                flush_config2(bcast)
+            end
+        end
+
+        # Step 8: GPI_EN back to 0.
+        write_reg(bcast, TRIGGER_ADDR,
+                  as_word(TRIGGER(SW_RESET_NOOP, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+        # Step 9: restore GPI_CONFIG to its reset value.
+        bcast.c2.GPI_CONFIG = UInt8(GPI_PD_HIZ)
+        flush_config2(bcast)
+
+        # Step 10: snapshot each device's registers into NVM. Done per-device
+        # at its new address so we can poll NVM_BUSY — broadcast can't read.
+        # `probe` confirms the address change actually landed before we touch
+        # NVM; otherwise a missing/mis-addressed device would silently fall
+        # through to the next bus participant.
+        for (desired_addr, _) in pairs
+            addr = UInt8(desired_addr)
+            dev = DACDevice(I2C.open_device(Int(bus), addr))
+            probe(dev)
+            refresh_cache!(dev)
+            program_nvm(dev)
+            result[addr] = dev
+        end
+    finally
+        close_dac(bcast)
+    end
+    return result
+end
+
+#=============================================================================
   Cleanup
 =============================================================================#
 
@@ -1053,6 +1136,8 @@ export
     configure_gpi, enable_gpi, disable_gpi,
     trigger_margin_high, trigger_margin_low,
     # PMBus
-    enable_pmbus, pmbus_operation, pmbus_status, clear_pmbus_cml, pmbus_version
+    enable_pmbus, pmbus_operation, pmbus_status, clear_pmbus_cml, pmbus_version,
+    # Bulk slave-address assignment
+    set_dac_addresses
 
 end # module DAC43701
