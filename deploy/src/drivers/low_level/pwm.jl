@@ -15,18 +15,10 @@ module PWM
 
 export PWMChannel, PWMChip
 export open_chip, export_channel, unexport_channel
-export set_period_ns, set_duty_cycle_ns, set_duty_cycle_percent
+export set_period_ns, set_duty_cycle_ns, set_duty_cycle_percent, set_duty_cycle_ratio
 export enable, disable, set_polarity
 
 const PWM_SYSFS_PATH = "/sys/class/pwm"
-
-# Map GPIO pins to PWM channels (Raspberry Pi specific)
-const GPIO_TO_PWM_CHANNEL = Dict(
-    18 => 0,  # GPIO 18 -> pwm0
-    19 => 1,  # GPIO 19 -> pwm1
-    12 => 0,  # GPIO 12 -> pwm0 (alternate)
-    13 => 1,  # GPIO 13 -> pwm1 (alternate)
-)
 
 #=============================================================================
   PWM Types
@@ -105,19 +97,6 @@ function export_channel(chip::PWMChip, channel::Int)
     end
 
     return PWMChannel(chip, channel, channel_path, 0, true)
-end
-
-"""
-    export_channel_for_gpio(chip::PWMChip, gpio_pin::Int) -> PWMChannel
-
-Export a PWM channel corresponding to the given GPIO pin.
-"""
-function export_channel_for_gpio(chip::PWMChip, gpio_pin::Int)
-    if !haskey(GPIO_TO_PWM_CHANNEL, gpio_pin)
-        error("GPIO pin $gpio_pin does not support hardware PWM")
-    end
-    channel = GPIO_TO_PWM_CHANNEL[gpio_pin]
-    return export_channel(chip, channel)
 end
 
 """
