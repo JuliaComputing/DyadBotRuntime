@@ -12,6 +12,7 @@ export open_device, close_device
 export read_byte, write_byte, read_byte_data, write_byte_data
 export read_block_data, write_block_data
 export read_bytes, read_bytes!, write_bytes
+export read_word_be, write_word_be
 
 #=============================================================================
   I2C Device Handle
@@ -404,6 +405,75 @@ function write_bytes(dev::I2CDevice, reg::UInt8, data::AbstractVector{UInt8})
 
     return ret
 end
+
+#=============================================================================
+  Big-endian 16-bit register helpers
+
+  Some devices (e.g. TI DAC43701) send the most-significant byte first on the
+  wire instead of the SMBus little-endian convention used by `read_word_data`
+  / `write_word_data`. These wrappers go through I2C_RDWR (same path as
+  `read_bytes!` / `write_bytes`) and shuffle the bytes so the caller sees a
+  plain `UInt16` register value regardless of endianness.
+
+  Both reuse `dev.data_buf` and `dev.msgs_buf`, so no per-call allocations.
+=============================================================================#
+
+"""
+    read_word_be(dev::I2CDevice, reg::Integer) -> UInt16
+
+Read a 16-bit register whose contents arrive MSB-first on the wire. Wire
+framing matches `read_bytes!(dev, reg, dest)` with `length(dest) == 2`; the
+returned word is `(MSB << 8) | LSB`.
+"""
+function read_word_be(dev::I2CDevice, reg::Integer)
+    regb = UInt8(reg & 0xFF)
+    dev.data_buf[1] = regb
+
+    msgs_ptr = Ptr{I2CMsg}(pointer(dev.msgs_buf))
+    unsafe_store!(msgs_ptr,
+                  I2CMsg(dev.address, UInt16(0),  UInt16(1), UInt16(0),
+                         pointer(dev.data_buf)),    1)
+    unsafe_store!(msgs_ptr,
+                  I2CMsg(dev.address, I2C_M_RD,  UInt16(2), UInt16(0),
+                         pointer(dev.data_buf, 2)), 2)
+
+    rdwr = I2CRdwrIoctlData(msgs_ptr, UInt32(2), UInt32(0))
+    unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
+
+    ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
+    ret < 0 && i2c_error("read_word_be", dev; reg=regb)
+
+    return (UInt16(dev.data_buf[2]) << 8) | UInt16(dev.data_buf[3])
+end
+
+"""
+    write_word_be(dev::I2CDevice, reg::Integer, value::UInt16) -> Int
+
+Write a 16-bit register MSB-first on the wire. Wire framing matches
+`write_bytes(dev, reg, [MSB, LSB])`.
+"""
+function write_word_be(dev::I2CDevice, reg::Integer, value::UInt16)
+    regb = UInt8(reg & 0xFF)
+    dev.data_buf[1] = regb
+    dev.data_buf[2] = UInt8((value >> 8) & 0xFF)  # MSB
+    dev.data_buf[3] = UInt8(value & 0xFF)         # LSB
+
+    msgs_ptr = Ptr{I2CMsg}(pointer(dev.msgs_buf))
+    unsafe_store!(msgs_ptr,
+                  I2CMsg(dev.address, UInt16(0), UInt16(3), UInt16(0),
+                         pointer(dev.data_buf)), 1)
+
+    rdwr = I2CRdwrIoctlData(msgs_ptr, UInt32(1), UInt32(0))
+    unsafe_store!(Ptr{I2CRdwrIoctlData}(pointer(dev.ioctl_buf)), rdwr)
+
+    ret = ioctl(dev.fd, UInt(I2C_RDWR), pointer(dev.ioctl_buf))
+    ret < 0 && i2c_error("write_word_be", dev; reg=regb)
+
+    return ret
+end
+
+write_word_be(dev::I2CDevice, reg::Integer, value::Integer) =
+    write_word_be(dev, reg, UInt16(value & 0xFFFF))
 
 #=============================================================================
   Convenience Aliases

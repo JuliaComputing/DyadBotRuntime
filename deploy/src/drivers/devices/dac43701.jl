@@ -411,8 +411,6 @@ Wrapper for a Texas Instruments DAC43701 over I²C.
 - `device::I2C.I2CDevice`: I²C device handle.
 - `gc::GENERAL_CONFIG`:    cached GENERAL_CONFIG (D1h) contents.
 - `c2::CONFIG2`:           cached CONFIG2 (D2h) contents.
-- `tx_buf::Vector{UInt8}`: pre-allocated 2-byte TX buffer (MSDB, LSDB).
-- `rx_buf::Vector{UInt8}`: pre-allocated 2-byte RX buffer for register reads.
 
 The two cached config structs are updated by every high-level helper that
 writes them, so per-field updates don't clobber neighbouring fields.
@@ -421,8 +419,6 @@ mutable struct DACDevice
     device::I2C.I2CDevice
     gc::GENERAL_CONFIG
     c2::CONFIG2
-    tx_buf::Vector{UInt8}
-    rx_buf::Vector{UInt8}
 end
 
 """
@@ -433,10 +429,8 @@ initialised to the chip's POR defaults. If your DAC has had its NVM
 reprogrammed, call `refresh_cache!(dev)` afterwards so the cache matches what
 the chip currently holds.
 """
-function DACDevice(device::I2C.I2CDevice)
-    return DACDevice(device, general_config_reset(), config2_reset(),
-                     zeros(UInt8, 2), zeros(UInt8, 2))
-end
+DACDevice(device::I2C.I2CDevice) =
+    DACDevice(device, general_config_reset(), config2_reset())
 
 """
     open_dac(bus::Integer, address::Integer = DAC43701_ADDR_DEFAULT) -> DACDevice
@@ -466,9 +460,7 @@ Write a 16-bit register, MSDB then LSDB on the wire (datasheet §8.5.2 update
 sequence: address byte, command byte, MSDB, LSDB).
 """
 function write_reg(dev::DACDevice, reg::Integer, value::UInt16)
-    dev.tx_buf[1] = UInt8((value >> 8) & 0xFF)  # MSDB
-    dev.tx_buf[2] = UInt8(value & 0xFF)         # LSDB
-    I2C.write_bytes(dev.device, UInt8(reg), dev.tx_buf)
+    I2C.write_word_be(dev.device, reg, value)
     return value
 end
 
@@ -480,10 +472,7 @@ write_reg(dev::DACDevice, reg::Integer, value::Integer) =
 
 Read a 16-bit register. The DAC sends MSDB first, then LSDB.
 """
-function read_reg(dev::DACDevice, reg::Integer)
-    I2C.read_bytes!(dev.device, UInt8(reg), dev.rx_buf)
-    return (UInt16(dev.rx_buf[1]) << 8) | UInt16(dev.rx_buf[2])
-end
+read_reg(dev::DACDevice, reg::Integer) = I2C.read_word_be(dev.device, reg)
 
 """
     modify_reg!(dev::DACDevice, reg::Integer, mask::UInt16, value::UInt16) -> UInt16
