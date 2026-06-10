@@ -570,6 +570,20 @@ function probe(dev::DACDevice)
     return true
 end
 
+function probe_check(bus::Int, addr::UInt8)
+    dev = open_dac(bus, addr)
+    good = false
+    try
+        dev_w_addr = I2C.probe(dev.device)
+        if dev_w_addr
+            good = device_id(dev) == DAC43701_DEVICE_ID
+        end
+    finally
+        close_dac(dev)
+    end
+    return good
+end
+
 """
     wait_nvm_idle(dev::DACDevice; timeout_s = 0.1, poll_s = 0.001)
 
@@ -1060,12 +1074,16 @@ function set_dac_addresses(bus::Integer, pairs)
 
         # Step 8: GPI_EN back to 0.
         write_reg(bcast, TRIGGER_ADDR,
-                  as_word(TRIGGER(SW_RESET_NOOP, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+                  as_word(TRIGGER(SW_RESET_NOOP, 0, 0, 0, 0, 0, 0, 0, 0)))
         # Step 9: restore GPI_CONFIG to its reset value.
         bcast.c2.GPI_CONFIG = UInt8(GPI_PD_HIZ)
         flush_config2(bcast)
 
-        # Step 10: snapshot each device's registers into NVM. Done per-device
+        # Step 10: trigger NVM write across all devices
+        _trigger_action!(bcast; nvm_prog = true)
+        sleep(0.1)
+
+        # Step 11: snapshot each device's registers into NVM. Done per-device
         # at its new address so we can poll NVM_BUSY — broadcast can't read.
         # `probe` confirms the address change actually landed before we touch
         # NVM; otherwise a missing/mis-addressed device would silently fall
@@ -1075,7 +1093,6 @@ function set_dac_addresses(bus::Integer, pairs)
             dev = DACDevice(I2C.open_device(Int(bus), addr))
             probe(dev)
             refresh_cache!(dev)
-            program_nvm(dev)
             result[addr] = dev
         end
     finally

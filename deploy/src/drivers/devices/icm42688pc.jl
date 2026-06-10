@@ -963,10 +963,10 @@ function read_all_raw(imu::ICM42688PC)
     buf = imu.rx_buf  # data at indices 2..15
 
     return ICM42688PCData(
+        parse_pair(imu, buf[2],  buf[3]),   # TEMP
         parse_pair(imu, buf[4],  buf[5]),   # ACCEL_X
         parse_pair(imu, buf[6],  buf[7]),   # ACCEL_Y
         parse_pair(imu, buf[8],  buf[9]),   # ACCEL_Z
-        parse_pair(imu, buf[2],  buf[3]),   # TEMP
         parse_pair(imu, buf[10], buf[11]),  # GYRO_X
         parse_pair(imu, buf[12], buf[13]),  # GYRO_Y
         parse_pair(imu, buf[14], buf[15])   # GYRO_Z

@@ -1,0 +1,4 @@
+gyro_bias = [-12.64046875, 7.025625, 0.79890625]
+calibration_data = [0xff, 0x20, 0x4d, 0x25, 0xb5, 0x2f]
+threshold_low = 0.8
+threshold_high = 3.0

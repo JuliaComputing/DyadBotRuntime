@@ -49,12 +49,12 @@ Default values match the original Tumbller code.
 @kwdef mutable struct ParallelPID
     # Parameters
     # Balance control (PD)
-    kp_balance::Float32 = 55.0f0
-    kd_balance::Float32 = 0.75f0
+    kp_balance::Float32 = 55.0f0 * 1 / 2.0
+    kd_balance::Float32 = 0.75f0 * 1 / 1.0
 
     # Speed control (PI)
-    kp_speed::Float32 = 10.0f0
-    ki_speed::Float32 = 0.26f0
+    kp_speed::Float32 = 0.0 #0.1f0
+    ki_speed::Float32 = 0.0 #0.26f0
 
     # Turn control
     kp_turn::Float32 = 2.5f0
@@ -81,6 +81,7 @@ Default values match the original Tumbller code.
     speed_control_period_count::Int = 0
     speed_control_output::Float32 = 0.0f0
     rotation_control_output::Float32 = 0.0f0
+    balance_control_output::Float32 = 0.0f0
 end
 
 """
@@ -95,6 +96,7 @@ function reset_state!(c::ParallelPID)
     c.speed_control_period_count = 0
     c.speed_control_output = 0.0f0
     c.rotation_control_output = 0.0f0
+    c.balance_control_output = 0.0f0
     nothing
 end
 
@@ -188,8 +190,8 @@ Final: `pwm = balance - speed ± rotation`
 """
 function compute_pwm!(ctrl::BalanceController{ParallelPID},
                       encoder_count_left::Integer, encoder_count_right::Integer,
-                      ax::Integer, ay::Integer, az::Integer,
-                      gx::Integer, gy::Integer, gz::Integer)
+                      ax::Float32, ay::Float32, az::Float32,
+                      gx::Float32, gy::Float32, gz::Float32)
     c = ctrl.controller
 
     # Accumulate encoder pulses with sign based on current PWM direction
@@ -206,6 +208,7 @@ function compute_pwm!(ctrl::BalanceController{ParallelPID},
     # Balance control (PD on tilt angle)
     balance_control_output = c.kp_balance * (kalman_angle - ctrl.angle_zero) +
                              c.kd_balance * (gyro_x - ctrl.angular_velocity_zero)
+    c.balance_control_output = balance_control_output
 
     # Speed control (PI, runs every N cycles)
     c.speed_control_period_count += 1

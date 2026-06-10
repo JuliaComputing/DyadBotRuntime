@@ -3,20 +3,28 @@ module DyadBalans
 using Timers
 using Configurations
 using StatsBase
+using Libevdev
+
 include(joinpath(@__DIR__, "drivers", "low_level", "gpio.jl"))
 include(joinpath(@__DIR__, "drivers", "low_level", "pwm.jl"))
 include(joinpath(@__DIR__, "drivers", "low_level", "spi.jl"))
+include(joinpath(@__DIR__, "drivers", "low_level", "i2c.jl"))
 include(joinpath(@__DIR__, "drivers", "low_level", "shift_driver.jl"))
 
 include(joinpath(@__DIR__, "drivers", "devices", "seven_seg.jl"))
 include(joinpath(@__DIR__, "drivers", "devices", "ws2812_driver.jl"))
 include(joinpath(@__DIR__, "drivers", "devices", "icm42688pc.jl"))
 include(joinpath(@__DIR__, "drivers", "devices", "motor.jl"))
+include(joinpath(@__DIR__, "drivers", "devices", "ads7142.jl"))
+include(joinpath(@__DIR__, "drivers", "devices", "dac43701.jl"))
+
 
 using .GPIO
 using .PWM
 using .SPI
 using .ICM42688PC
+
+using Arrow
 
 module BalanceController
 include(joinpath(@__DIR__, "balance_original.jl"))
@@ -42,8 +50,10 @@ mutable struct HardwareContext
     nose::WS2812
     pins::Vector{GPIO.GPIOPin}
     imu::ICM42688PC.ICM42688PC
-    motor_a::Motor
-    motor_b::Motor
+    motor_a::Motor.Motor
+    motor_b::Motor.Motor
+    Vthp::DAC43701.DACDevice
+    Vthm::DAC43701.DACDevice
 end
 
 """
@@ -85,6 +95,8 @@ const NOSE_RGB=18
 @option mutable struct DyadBotOptions
     gyro_bias::Union{Nothing, Vector{Float64}} = nothing
     calibration_data::Union{Nothing, Vector{UInt8}} = nothing
+    threshold_low::Float64 = 0.8
+    threshold_high::Float64 = 3.0
 end
 
 function hsv_to_rgb(h::Real, s::Real, v::Real)
@@ -114,7 +126,7 @@ end
 function (@main)(args)::Cint
     println(Core.stdout, "Balance car starting...")
     if !isfile("options.toml")
-        to_toml("options.toml", DyadBotOptions(nothing, nothing); include_defaults=true)
+        to_toml("options.toml", DyadBotOptions(nothing, nothing, 0.8, 3.0); include_defaults=true)
     end
     options = from_toml(DyadBotOptions, "options.toml")
 
@@ -154,7 +166,7 @@ function (@main)(args)::Cint
         cod_result, gains = ICM42688PC.calibration_on_demand(imu)
         println(Core.stdout, "IMU CoD success = $(!cod_result.COD_Failed); gains = $gains. Calibrating gyro bias.")
         gx = []; gy = []; gz = []
-        ICM42688PC.set_gyro_config!(imu, ICM42688PC.Registers.GYRO_FS_128DPS, ICM42688PC.Registers.GYRO_ODR_896_8HZ)
+        ICM42688PC.set_gyro_config!(imu, ICM42688PC.Registers.GYRO_FS_512DPS, ICM42688PC.Registers.GYRO_ODR_896_8HZ)
         ICM42688PC.set_accel_config!(imu, ICM42688PC.Registers.ACCEL_FS_2G, ICM42688PC.Registers.ACCEL_ODR_1000HZ)
         ICM42688PC.set_sensor_config!(imu, true, true, false, false, false)
         sleep(0.1)
@@ -170,60 +182,71 @@ function (@main)(args)::Cint
         options.calibration_data = gains
         options.gyro_bias = collect(offsets)
         ICM42688PC.set_gyro_bias(imu, offsets)
-        to_toml("options.toml", options; include_defaults=true)
     else
         println(Core.stdout, "Loading saved IMU gains.")
         ICM42688PC.load_calibration(imu, options.calibration_data)
         ICM42688PC.set_gyro_bias(imu, (options.gyro_bias...,))
     end 
-    ICM42688PC.set_gyro_config!(imu, ICM42688PC.Registers.GYRO_FS_128DPS, ICM42688PC.Registers.GYRO_ODR_896_8HZ)
+    ICM42688PC.set_gyro_config!(imu, ICM42688PC.Registers.GYRO_FS_512DPS, ICM42688PC.Registers.GYRO_ODR_896_8HZ)
     ICM42688PC.set_accel_config!(imu, ICM42688PC.Registers.ACCEL_FS_2G, ICM42688PC.Registers.ACCEL_ODR_1000HZ)
     ICM42688PC.set_sensor_config!(imu, true, true, false, false, false)
     println(Core.stdout, "IMU initialized!")
 
     # PWM/motor initialization
     chip = open_chip()
-    motor_a = Motor(export_channel(chip, 0), export_channel(chip, 1))
-    motor_b = Motor(export_channel(chip, 2), export_channel(chip, 3))
+    @show REL_X
+    motor_a = Motor.Motor(export_channel(chip, 0), export_channel(chip, 1), AxisTracker("/dev/input/event2"), REL_X)
+    # flipped since motor_b is the opposite orientation to motor_a
+    motor_b = Motor.Motor(export_channel(chip, 3), export_channel(chip, 2), AxisTracker("/dev/input/event1"), REL_Y)
+
+    GPIO.set_value(cm_present, 1)
+    # ADS7142: 0x18
+    # Vth+ - GPI1 = chain[4] - 0x48
+    # Vth- - GPI2 = chain[5] - 0x49
+    # Window comparator initialization
+    # first check to see if the DACs have been set up already
+    (Vthp, Vthm) = if true #!DAC43701.probe_check(1, 0x48) || !DAC43701.probe_check(1, 0x49)
+        set_gpi(gpi_no) = function (cb)
+            chain[gpi_no] = true
+            try
+                cb()
+            finally
+                chain[gpi_no] = false
+            end
+        end
+        devs = DAC43701.set_dac_addresses(1, [
+            0x48 => set_gpi(4),
+            0x49 => set_gpi(5)
+        ])
+        (devs[0x48], devs[0x49])
+    else
+        (DAC43701.open_dac(1, 0x48), DAC43701.open_dac(1, 0x49))
+    end
+    DAC43701.set_dac_code(Vthp, floor(Int, 256 * (options.threshold_high / 3.3)))
+    DAC43701.power_up(Vthp);
+    DAC43701.set_dac_code(Vthm, floor(Int, 256 * (options.threshold_low / 3.3)))
+    DAC43701.power_up(Vthm)
 
 
-    hw = HardwareContext(gpio, pio, chain, nose, [cm_present, d1, d2], imu, motor_a, motor_b)
+    to_toml("options.toml", options; include_defaults=true)
+    hw = HardwareContext(gpio, pio, chain, nose, [cm_present, d1, d2], imu, motor_a, motor_b, Vthp, Vthm)
 
     # Enable hardware
-    GPIO.set_value(cm_present, 1)
     GPIO.set_value(d1, 1)
     GPIO.set_value(d2, 0)
     d1v = 1
     d2v = 0
 
     # 7-segment displays on 2nd and 3rd shift registers
-    #disp1 = SevenSeg(chain, 8)   # 2nd register: bits 8–15
-    #disp2 = SevenSeg(chain, 16)  # 3rd register: bits 16–23
+    disp1 = SevenSeg(chain, 8)   # 2nd register: bits 8–15
+    disp2 = SevenSeg(chain, 16)  # 3rd register: bits 16–23
 
          
     digit = 0
     hue = 0
 
-    # Control loop timing (500ms = 2Hz)
-    loop_period_ns = 50_000_000
-    #=
-    println("reboot vdd start, disable spi gpio")
-    readline()
-    for i=1:100
-        sleep(0.0001)
-        transaction(chain) do
-            chain[7]=false
-        end
-    end
-    for i=1:100
-        sleep(0.0001)
-        transaction(chain) do
-            chain[7]=true
-        end
-    end
-    println("reboot vdd done, reenable spi gpio")
-    readline()
-    =#
+    # Control loop timing (5ms = 200Hz)
+    loop_period_ns = 5_000_000
     for i=1:100
         sleep(0.0001)
         transaction(chain) do
@@ -231,10 +254,25 @@ function (@main)(args)::Cint
             chain[7]=true
         end
     end
+
+    controller = BalanceController.BalanceController(; angle_zero=-2.5f0)
+    records = @NamedTuple{now::UInt64, kalman_angle::Float64,
+        accel_x::Float64, accel_y::Float64, accel_z::Float64,
+        gyro_x::Float64, gyro_y::Float64, gyro_z::Float64,
+        pwm_left::Float64, pwm_right::Float64,
+        speed_filter::Float64, speed_control_output::Float64, rotation_control_output::Float64, balance_control_output::Float64}[]
+
     println(Core.stdout, "Starting control loop...")
     Base.exit_on_sigint(false)
+    loop_init = time_ns()
     loop_start = time_ns()
+    last_eyes = 0.0
 
+    Motor.enable!(motor_a)
+    Motor.enable!(motor_b)
+    a_last = Motor.angle(motor_a)
+    b_last = -Motor.angle(motor_b)
+    now = 0.0
     try
         while true
             # Wait for next loop iteration
@@ -245,18 +283,16 @@ function (@main)(args)::Cint
                 chain[7]=true
             end
             state = ICM42688PC.read_all(imu)
+            
+            angle_a = Motor.angle(motor_a)
+            angle_b = -Motor.angle(motor_b)
+            kalman_angle = BalanceController.compute_pwm!(controller,
+                angle_a - a_last, angle_b - b_last,
+                Float32(state.accel_x), Float32(-state.accel_z), Float32(state.accel_y),
+                Float32(state.gyro_x), Float32(-state.gyro_z), Float32(state.gyro_y)) # swap y/z because of the different orientation
+            a_last = angle_a
+            b_last = angle_b
 
-            #=out = UInt8[0x76,0]
-            res = UInt8[0,0]
-            nl = transfer!(imu_spi, out, res)
-            println(Core.stdout, "IMU $(out) WHO_AM_I: $(res[1]), $(res[2]) nl: $nl")
-            sleep(0.01)
-            out = UInt8[0xF5,0]
-            res = UInt8[0,0]
-            nl = transfer!(imu_spi, out, res)
-            close(imu_spi)
-            println(Core.stdout, "IMU $(out) WHO_AM_I: $(res[1]), $(res[2]) nl: $nl") 
-            =#
             # Blink GPIOs
             d1v = 1-d1v
             d2v = 1-d2v
@@ -264,12 +300,31 @@ function (@main)(args)::Cint
             GPIO.set_value(d2, d2v)
 
             # Display 1 shows current digit, display 2 shows previous
-            #transaction(chain) do
-            #    show_digit!(disp2, digit)
-            #    show_digit!(disp1, (digit + 1) % 10)
-            #end
-            digit = (digit + 1) % 10
+            if time_ns() - last_eyes > 500_000_000
+                transaction(chain) do
+                    show_digit!(disp2, digit)
+                    show_digit!(disp1, (digit + 1) % 10)
+                end
+                digit = (digit + 1) % 10
+                last_eyes = time_ns()
+            end
             set_color!(nose, floor.(Int, 255 .* palette_to_rgb(state.gyro_x/20, state.gyro_y/20))...)
+
+            Motor.set_drive!(motor_a, 0.8*controller.pwm_right/255.0)
+            Motor.set_drive!(motor_b, 0.8*controller.pwm_left/255.0) 
+            #@show kalman_angle
+            push!(records, (;
+                now = time_ns() - loop_init, kalman_angle=kalman_angle,
+                accel_x=state.accel_x, accel_y=-state.accel_z, accel_z=state.accel_y,
+                gyro_x=state.gyro_x, gyro_y=-state.gyro_z, gyro_z=state.gyro_y,
+                pwm_left=controller.pwm_left, pwm_right=controller.pwm_right,
+                speed_filter=controller.controller.speed_filter,
+                speed_control_output=controller.controller.speed_control_output,
+                rotation_control_output=controller.controller.rotation_control_output,
+                balance_control_output=controller.controller.balance_control_output
+            ))
+            #@show controller.pwm_left
+            now += 0.01
         end
     catch e
         if e isa InterruptException
@@ -281,6 +336,7 @@ function (@main)(args)::Cint
     finally
         shutdown!(hw)
     end
+    Arrow.write("run.arrow", records)
     return 0
 end
 

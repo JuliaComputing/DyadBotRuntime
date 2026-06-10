@@ -8,7 +8,7 @@
 module I2C
 
 export I2CDevice
-export open_device, close_device
+export open_device, close_device, probe
 export read_byte, write_byte, read_byte_data, write_byte_data
 export read_block_data, write_block_data
 export read_bytes, read_bytes!, write_bytes
@@ -36,7 +36,7 @@ end
 =============================================================================#
 
 # Get last errno value
-get_errno() = ccall(:__errno_location, Ptr{Cint}, ())[]
+get_errno() = unsafe_load(ccall(:__errno_location, Ptr{Cint}, ()))
 
 # Common errno values for I2C operations (Linux)
 const ERRNO_NAMES = Dict{Cint, Tuple{String, String}}(
@@ -115,6 +115,7 @@ const I2C_SMBUS_READ  = UInt8(1)
 const I2C_SMBUS_WRITE = UInt8(0)
 
 # SMBus transaction sizes
+const I2C_SMBUS_QUICK = UInt32(0)
 const I2C_SMBUS_BYTE        = UInt32(1)
 const I2C_SMBUS_BYTE_DATA   = UInt32(2)
 const I2C_SMBUS_WORD_DATA   = UInt32(3)
@@ -219,6 +220,61 @@ Close an I2C device.
 """
 function close_device(dev::I2CDevice)
     ccall(:close, Cint, (Cint,), Base.cconvert(Cint, dev.fd))
+end
+
+#=============================================================================
+  Device Presence Probe
+=============================================================================#
+
+"""
+    probe(dev::I2CDevice; method::Symbol = :quick) -> Bool
+
+Check whether a device is responding at the address this `I2CDevice` is bound
+to. Returns `true` if the device ACKs, `false` if it NAKs.
+
+`method` selects the probe transaction:
+- `:quick` (default) — SMBus quick write. Sends only the address byte with
+  the R/W bit and checks for ACK. Lowest-impact probe, but a few devices
+  (notably some write-only DACs and RTC alarm bits) can latch on it.
+- `:read`  — SMBus receive-byte. Issues a one-byte read instead. Use for
+  addresses where quick-write may be destructive — `i2cdetect` uses this
+  for 0x30–0x37 and 0x50–0x5F (typical EEPROM / RTC ranges).
+
+Errors other than NAK (e.g. `EBUSY` from a kernel driver already bound to
+the address) are surfaced as exceptions rather than silently returning false.
+"""
+function probe(dev::I2CDevice; method::Symbol = :quick)
+    ret = if method === :quick
+        smbus_access(dev, I2C_SMBUS_WRITE, UInt8(0), I2C_SMBUS_QUICK)
+    elseif method === :read
+        smbus_access(dev, I2C_SMBUS_READ,  UInt8(0), I2C_SMBUS_BYTE)
+    else
+        error("probe: unknown method $method (expected :quick or :read)")
+    end
+
+    ret >= 0 && return true
+
+    errno = get_errno()
+    # ENXIO (6) and EREMOTEIO (121) are the normal "no device on bus" responses.
+    (errno == 6 || errno == 121) && return false
+
+    # Anything else (EBUSY, EIO, EAGAIN, …) is a real problem — let the caller see it.
+    i2c_error("probe", dev)
+end
+
+"""
+    probe(bus::Int, address::Integer; method::Symbol = :quick) -> Bool
+
+Convenience form: open the bus at `address`, probe, and close. Useful for
+ad-hoc bus scans without holding a device handle.
+"""
+function probe(bus::Int, address::Integer; method::Symbol = :quick)
+    dev = open_device(bus, Int(address))
+    try
+        return probe(dev; method = method)
+    finally
+        close_device(dev)
+    end
 end
 
 #=============================================================================

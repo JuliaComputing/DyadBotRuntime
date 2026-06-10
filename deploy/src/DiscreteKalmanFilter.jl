@@ -127,23 +127,26 @@ update!(kf, gyro_x, angle)
 ```
 That is, the gyro x reading is used as control input, and the angle computed from accelerometer as measurement.
 
+Note that the original implementation used raw accelerometer measurements (at 16384 LSB/g), whereas here we
+precorrect the accelerometer to read a Float32 in g's. Similarly we intepret the gyro measurements as 
+precalculated degrees per second.
+
 
 # Arguments
 - `kf`: IMUKalmanFilter instance
-- `ax, ay, az`: Raw accelerometer readings (int16)
-- `gx, gy, gz`: Raw gyroscope readings (int16)
+- `ax, ay, az`: Accelerometer readings (float32, g)
+- `gx, gy, gz`: Gyroscope readings (float32, deg/sec)
 """
-function compute_angles(ax::Integer, ay::Integer, az::Integer,
-                       gx::Integer, gy::Integer, gz::Integer)
+function compute_angles(ax::Float32, ay::Float32, az::Float32,
+                       gx::Float32, gy::Float32, gz::Float32)
     # Calculate angle from accelerometer (radians to degrees)
     angle = atan(Float32(ay), Float32(az)) * (180.0f0 / pi)
 
     # Apply gyro calibration offset and scale
-    gyro_x = (gx - GYRO_OFFSET) / GYRO_SCALE
-
+    gyro_x = gx #(gx - GYRO_OFFSET) / GYRO_SCALE
 
     # Store z-axis gyro (for turn control)
-    gyro_z = -gz / GYRO_SCALE
+    gyro_z = -gz # / GYRO_SCALE
 
     angle, gyro_x, gyro_z
 end

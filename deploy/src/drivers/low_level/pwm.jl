@@ -15,7 +15,7 @@ module PWM
 
 export PWMChannel, PWMChip
 export open_chip, export_channel, unexport_channel
-export set_period_ns, set_duty_cycle_ns, set_duty_cycle_percent, set_duty_cycle_ratio
+export set_period_ns, set_period_hz, set_duty_cycle_ns, set_duty_cycle_percent, set_duty_cycle_ratio
 export enable, disable, set_polarity
 
 const PWM_SYSFS_PATH = "/sys/class/pwm"
