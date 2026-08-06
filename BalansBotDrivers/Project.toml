@@ -1,0 +1,22 @@
+name = "BalansBotDrivers"
+uuid = "825443c2-6a71-43bb-a614-9f2bf9e50e56"
+version = "0.1.0"
+authors = ["Ben Chung <benjamin.chung@juliahub.com>"]
+
+[deps]
+Configurations = "5218b696-f38b-4ac9-8b61-a12ec717816d"
+FieldFlags = "3debba03-e216-4816-844a-cb4454e272d5"
+FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
+Libevdev = "16d368ef-f5da-4971-84d3-b8145f955bda"
+PIOLib = "a21b0171-75fd-41b6-8640-f97fa3fa9a76"
+PIOLib_jll = "71578703-7aff-5c16-bbae-7ba9c160b2b9"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Timers = "21f18d07-b854-4dab-86f0-c15a3821819a"
+
+[sources]
+Libevdev = {url = "https://github.com/JuliaComputing/Libevdev.jl"}
+PIOLib = {url = "https://github.com/JuliaComputing/PIOLib.jl"}
+
+[compat]
+FileWatching = "1.11.0"

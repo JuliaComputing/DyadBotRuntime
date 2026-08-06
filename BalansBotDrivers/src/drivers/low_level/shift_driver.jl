@@ -1,0 +1,265 @@
+using PIOLib
+
+const SHIFT_RIGHT = true   # LSB first
+const SHIFT_LEFT  = false  # MSB first
+
+function shift_register_program(pio::PIOBlock; ser_pin::Integer, clk_pin::Integer, rclk_pin::Integer,
+                                  nbits::Integer, clkdiv::Real=1.0f0)
+    1 <= nbits <= 31 || error("nbits must be 1-31 (SET immediate is 5 bits, and 32 encodes as 0 in autopull threshold)")
+
+    prog = build_program([
+        WrapTarget(),
+        Mov{:none}(RegX(), RegY(); sideset=0),
+        Label(:bitloop),
+        Out(Pins(), 1; sideset=0),
+        Jmp{:x_dec}(:bitloop; sideset=1),
+        PIOLib.Set(Pins(), 1; sideset=0),
+        PIOLib.Set(Pins(), 0; sideset=0),
+        Wrap(),
+    ]; sideset_bits=1)
+
+    config = SMConfig(pio;
+        out_pins=(ser_pin, 1),
+        set_pins=(rclk_pin, 1),
+        sideset_pin_base=clk_pin,
+        sideset=(1, false, false),
+        out_shift=(SHIFT_LEFT, true, nbits),
+        clkdiv=Float32(clkdiv),
+        wrap=(prog.wrap_target, prog.wrap),
+    )
+
+    prog, config
+end
+
+function setup_shift_register!(sm::StateMachine, nbits::Integer)
+    exec!(sm, PIOLib.Set(RegY(), nbits - 1))
+end
+
+shift_out!(sm::StateMachine, data::UInt32) = put!(sm, data)
+
+# --- Pin assignments ---
+const SER_PIN  = 26  # Serial data  (SER/DS)
+const CLK_PIN  = 19  # Shift clock  (SRCLK/SHCP)
+const RCLK_PIN = 6   # Latch/output clock (RCLK/STCP)
+
+# 3 chained 74HC595 shift registers = 24 bits per transfer
+const NUM_REGISTERS = 3
+const NBITS = NUM_REGISTERS * 8  # 24
+
+# Clock divider: 125 MHz / 62.5 = 2 MHz PIO clock → 1 MHz shift rate
+const CLKDIV = 62.5f0
+
+"""
+    ShiftRegisterChain
+
+Driver for 3 daisy-chained 74HC595 shift registers controlled via PIO.
+Each register provides 8 output pins (Q0-Q7), for 24 outputs total.
+Maintains a shadow register so pin state can be read back and modified
+individually without re-specifying the full output word.
+
+Data layout in a 24-bit word:
+- Bits  0–7:  Register 3 (end of chain, closest to SER_PIN)
+- Bits  8–15: Register 2 (middle)
+- Bits 16–23: Register 1 (start of chain, farthest from SER_PIN)
+
+# Indexing (0-based pin numbers)
+    chain[5]              # read pin 5 → Bool
+    chain[5] = true       # set pin 5, flush immediately
+    chain[[0,3,15]] = true                  # set multiple pins to same value
+    chain[[0,3,15]] = [true, false, true]   # set multiple pins to different values
+    chain[0:7] = 0xFF                       # set range from byte
+    chain[0:7] = false                      # clear range
+
+# Transactions (single flush for multiple operations)
+    transaction(chain) do
+        chain[0] = sensor_val
+        chain[1] = chain[0]
+    end
+"""
+mutable struct ShiftRegisterChain
+    pio::PIOBlock
+    sm::StateMachine
+    state::UInt32
+    hold::Bool
+end
+
+"""
+    open_shift_registers(pio::PIOBlock) -> ShiftRegisterChain
+
+Initialize a state machine on `pio` for driving the shift register chain.
+The PIO block must already be open (caller manages its lifetime).
+"""
+function open_shift_registers(pio::PIOBlock)
+    prog, config = shift_register_program(pio;
+        ser_pin=SER_PIN, clk_pin=CLK_PIN, rclk_pin=RCLK_PIN,
+        nbits=NBITS, clkdiv=CLKDIV,
+    )
+
+    for pin in (SER_PIN, CLK_PIN, RCLK_PIN)
+        pio_pin_init!(pio, pin)
+    end
+
+    offset = load_program!(pio, prog, config)
+
+    sm = claim_sm(pio)
+    try
+        pin_mask = UInt32(1) << SER_PIN | UInt32(1) << CLK_PIN | UInt32(1) << RCLK_PIN
+        set_pindirs!(sm, pin_mask, pin_mask)
+        PIOLib.init!(sm, offset, config)
+        setup_shift_register!(sm, NBITS)
+        enable!(sm)
+    catch
+        unclaim!(sm)
+        rethrow()
+    end
+
+    return ShiftRegisterChain(pio, sm, UInt32(0), false)
+end
+
+# --- Flush ---
+
+function flush!(chain::ShiftRegisterChain)
+    # OSR shifts left (MSB first). 74HC595 clocks SER → Q0 → Q7,
+    # so first bit in ends up at Q7, last bit at Q0.
+    # MSB-first means bit 7 goes first → Q7, bit 0 last → Q0.
+    # No bit reversal needed — natural alignment.
+    shift_out!(chain.sm, (chain.state & 0x00FFFFFF) << (32 - NBITS))
+end
+
+# --- Bulk writes (update shadow + flush) ---
+
+function write_outputs!(chain::ShiftRegisterChain, data::UInt32)
+    chain.state = data & 0x00FFFFFF
+    chain.hold || flush!(chain)
+end
+
+function write_registers!(chain::ShiftRegisterChain, reg1::UInt8, reg2::UInt8, reg3::UInt8)
+    chain.state = (UInt32(reg1) << 16) | (UInt32(reg2) << 8) | UInt32(reg3)
+    chain.hold || flush!(chain)
+end
+
+# --- Transaction ---
+
+function transaction(f, chain::ShiftRegisterChain)
+    was_held = chain.hold
+    chain.hold = true
+    try
+        f()
+    finally
+        chain.hold = was_held
+        was_held || flush!(chain)
+    end
+end
+
+# --- Single pin: chain[i] ---
+
+function _check_pin(i::Integer)
+    0 <= i <= 23 || throw(BoundsError("pin index must be 0-23, got $i"))
+end
+
+function Base.getindex(chain::ShiftRegisterChain, i::Integer)
+    _check_pin(i)
+    (chain.state >> i) & 1 == 1
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, val::Bool, i::Integer)
+    _check_pin(i)
+    if val
+        chain.state |= UInt32(1) << i
+    else
+        chain.state &= ~(UInt32(1) << i)
+    end
+    chain.hold || flush!(chain)
+    val
+end
+
+# --- Multiple pins: chain[[0, 3, 15]] = true / [true, false, true] ---
+
+function Base.getindex(chain::ShiftRegisterChain, idxs::AbstractVector{<:Integer})
+    [chain[i] for i in idxs]
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, val::Bool, idxs::AbstractVector{<:Integer})
+    for i in idxs
+        _check_pin(i)
+        if val
+            chain.state |= UInt32(1) << i
+        else
+            chain.state &= ~(UInt32(1) << i)
+        end
+    end
+    chain.hold || flush!(chain)
+    val
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, vals::AbstractVector{Bool}, idxs::AbstractVector{<:Integer})
+    length(vals) == length(idxs) || throw(DimensionMismatch("$(length(vals)) values for $(length(idxs)) pins"))
+    for (i, v) in zip(idxs, vals)
+        _check_pin(i)
+        if v
+            chain.state |= UInt32(1) << i
+        else
+            chain.state &= ~(UInt32(1) << i)
+        end
+    end
+    chain.hold || flush!(chain)
+    vals
+end
+
+# --- Range: chain[0:7] = 0xFF / true / false ---
+
+function Base.getindex(chain::ShiftRegisterChain, r::UnitRange{<:Integer})
+    [chain[i] for i in r]
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, val::Bool, r::UnitRange{<:Integer})
+    for i in r
+        _check_pin(i)
+        if val
+            chain.state |= UInt32(1) << i
+        else
+            chain.state &= ~(UInt32(1) << i)
+        end
+    end
+    chain.hold || flush!(chain)
+    val
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, byte::Integer, r::UnitRange{<:Integer})
+    nbits = length(r)
+    1 <= nbits <= 24 || throw(ArgumentError("range too wide"))
+    for (bit, i) in enumerate(r)
+        _check_pin(i)
+        if (byte >> (bit - 1)) & 1 == 1
+            chain.state |= UInt32(1) << i
+        else
+            chain.state &= ~(UInt32(1) << i)
+        end
+    end
+    chain.hold || flush!(chain)
+    byte
+end
+
+function Base.setindex!(chain::ShiftRegisterChain, vals::AbstractVector{Bool}, r::UnitRange{<:Integer})
+    length(vals) == length(r) || throw(DimensionMismatch("$(length(vals)) values for $(length(r)) pins"))
+    for (v, i) in zip(vals, r)
+        _check_pin(i)
+        if v
+            chain.state |= UInt32(1) << i
+        else
+            chain.state &= ~(UInt32(1) << i)
+        end
+    end
+    chain.hold || flush!(chain)
+    vals
+end
+
+# --- Cleanup ---
+
+function Base.close(chain::ShiftRegisterChain)
+    flush!(chain)
+    disable!(chain.sm)
+    unclaim!(chain.sm)
+end
+
+export transaction, write_registers, write_outputs!, flush!, open_shift_registers, ShiftRegisterChain
